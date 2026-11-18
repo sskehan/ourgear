@@ -1,1201 +1,1120 @@
-/* Our Gear v1.0 — purchases, receipts and warranties.
-   Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
-'use strict';
-const APP_VERSION = '1.0';
-const DROPBOX_KEY = '5ddeosl2pq5dl33';
-const DATA_PATH = '/data/ourgear-data.json';
-const OWNERS = ['Shaun', 'Lyndsey', 'Shared'];
-const PROPERTY_TYPES = ['Main residence', 'Investment', 'Holiday home', 'Other'];
-const FILE_KINDS = ['Receipt', 'Tax invoice', 'Warranty card', 'Manual', 'Photo', 'Serial plate', 'Certificate', 'Other'];
-const ITEM_STATUS = ['Active', 'Sold', 'Disposed', 'Replaced'];
-const THEMES = [
-  { id: 'midnight', name: 'Midnight and blue', a: '#0B1220', b: '#2F6BFF' },
-  { id: 'indigo', name: 'Clean white and indigo', a: '#FFFFFF', b: '#4F46E5' },
-  { id: 'slate', name: 'Slate and signal orange', a: '#1E293B', b: '#F97316' },
-  { id: 'ink', name: 'Deep ink and teal', a: '#0F2A2E', b: '#14B8A6' }
-];
-const DEFAULT_LISTS = {
-  categories: ['Kitchen appliances', 'Laundry', 'Heating and cooling', 'Hot water', 'Solar and energy', 'Security and CCTV',
-    'Computers and network', 'TV and audio', 'Phones and tablets', 'Tools', 'Garden and outdoor', 'Furniture', 'Hobbies', 'Other'],
-  locations: ['Kitchen', 'Laundry', 'Living', 'Dining', 'Bedroom 1', 'Bedroom 2', 'Bedroom 3', 'Bedroom 4', 'Bathroom', 'Ensuite',
-    'Garage', 'Shed', 'Under house', 'Yard', 'Roof', 'Server cupboard'],
-  warrantyTypes: ['Maker', 'Extended', 'Installer', 'Workmanship', 'Store'],
-  properties: [{ id: 'home', name: 'Home', type: 'Main residence', address: '' }],
-  updatedAt: 0
+"use strict";
+/* My Real Estate — investment property analyser for Shaun and Lyndsey. Data lives on each phone (IndexedDB) with a shared live copy in Dropbox.
+   The numbers all come from engine.js; the starting rules and preloaded properties from data.js. */
+const APP_ID = "my-real-estate", APP_VERSION = "1.01", BACKUP_VERSION = 1;
+
+/* ================= storage ================= */
+const STORES = ["props", "files", "meta"];
+let _db, _quiet = 0;
+function openDB() { return new Promise((res, rej) => { const r = indexedDB.open("my-real-estate", 2);
+  r.onupgradeneeded = () => { const d = r.result; for (const s of STORES) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: "id" }); };
+  r.onsuccess = () => { _db = r.result; res(_db); }; r.onerror = () => rej(r.error); }); }
+function tx(store, mode, fn) { return new Promise((res, rej) => { const t = _db.transaction(store, mode); const os = t.objectStore(store); let out; const r = fn(os); if (r) r.onsuccess = () => { out = r.result; }; t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error); }); }
+const dbAll = s => tx(s, "readonly", os => os.getAll());
+const dbPut = (s, o) => { if (!_quiet && o && s === "props") o._t = Date.now(); return tx(s, "readwrite", os => os.put(o)).then(r => { if (s === "props" || s === "files") markDirty(); return r; }); };
+const DATA_STORES = ["props", "files"]; // changes to these are sent to Dropbox
+const dbDel = (s, id) => { if (!_quiet && DATA_STORES.includes(s)) { S.meta.tomb = S.meta.tomb || {}; S.meta.tomb[id] = Date.now(); } return tx(s, "readwrite", os => os.delete(id)).then(r => { if (DATA_STORES.includes(s)) markDirty(); return r; }); };
+const dbGet = (s, id) => tx(s, "readonly", os => os.get(id));
+const saveMeta = () => tx("meta", "readwrite", os => os.put({ ...S.meta, id: "meta" }));
+const uid = p => (p || "x") + "-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+/* ================= state & helpers ================= */
+const S = { props: [], meta: {}, urls: {}, tab: "home", open: null, ptab: "report", filter: "all", set: null, wi: null, dutyState: "NSW", cmp: null, editOpen: {} };
+const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const clone = o => JSON.parse(JSON.stringify(o));
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const p2 = n => String(n).padStart(2, "0");
+const isoOf = d => d.getFullYear() + "-" + p2(d.getMonth() + 1) + "-" + p2(d.getDate());
+const todayISO = () => isoOf(new Date());
+const fmtDate = s => { if (!s) return "—"; const [y, m, d] = String(s).split("-"); return `${+d} ${MON[+m - 1]} ${y}`; };
+const N = v => { const n = Number(v); return isFinite(n) ? n : 0; };
+function num(v) { if (v == null) return null; const s = String(v).replace(/[,\s$%]/g, ""); if (s === "" || s === "-") return null; const n = Number(s); return isFinite(n) ? n : null; }
+const minus = "−";
+const money = (n, dp = 0) => n == null || isNaN(n) ? "—" : (n < -0.004 ? minus : "") + "$" + Math.abs(n).toLocaleString("en-AU", { minimumFractionDigits: dp, maximumFractionDigits: dp });
+const smoney = n => n == null || isNaN(n) ? "—" : (n > 0.5 ? "+" : "") + money(n);
+const pct = (x, dp = 1) => x == null || isNaN(x) ? "—" : (x * 100).toLocaleString("en-AU", { minimumFractionDigits: dp, maximumFractionDigits: dp }) + "%";
+const pctIn = x => x == null || x === "" ? "" : String(Math.round(N(x) * 100 * 10000) / 10000);
+const numIn = x => x == null || x === "" ? "" : String(Math.round(N(x) * 100) / 100);
+const wk = n => money(n) + "/wk";
+const cls = n => n > 0.5 ? "pos" : n < -0.5 ? "neg" : "";
+function toast(m) { const t = $("#toast"); t.textContent = m; t.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => t.hidden = true, 3600); }
+const cap1 = t => t ? t[0].toUpperCase() + t.slice(1) : t;
+const STATES = ["NSW", "VIC", "QLD", "SA", "WA", "TAS", "ACT", "NT"];
+const TYPES = ["Unit", "Townhouse", "Villa", "Duplex", "House", "House & land", "Land", "Other"];
+const STATUS = { owned: "Owned", looking: "Looking", passed: "Passed" };
+const fyOf = Engine.fyOf;
+
+/* settings = built-in defaults (data.js) overlaid with what's been changed on this phone / in Dropbox */
+function SET() { const s = S.meta.settings || {}; const d = SEED.SETTINGS; return { ...d, ...s, defaults: { ...d.defaults, ...(s.defaults || {}) } }; }
+async function saveSettings(s) { s._t = Date.now(); S.meta.settings = s; await saveMeta(); markDirty(); }
+function editSettings(fn) { const s = clone(SET()); fn(s); return saveSettings(s); }
+const people = () => SET().people || [];
+const pName = id => (people().find(p => p.id === id) || {}).name || "—";
+const ctx = () => { const s = SET(); return { taxYears: s.taxYears, duty: s.duty, lmi: s.lmi, people: s.people, borrowYears: s.borrowYears }; };
+const getP = id => S.props.find(p => p.id === id);
+/* ---- annual rules check: from 1 July each year until someone marks that financial year's figures as checked ---- */
+const curFy = () => fyOf(todayISO());
+const checkDue = () => SET().rulesCheckedFY !== curFy();
+const missingYear = () => !SET().taxYears[curFy()];
+const addrOf = p => [p.street, [p.suburb, p.state, p.postcode].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+const resCache = new Map();
+function result(p) { const key = p.id + ":" + (p._t || 0) + ":" + ((S.meta.settings || {})._t || 0); let r = resCache.get(key); if (!r) { r = Engine.run(p, ctx()); resCache.set(key, r); } return r; }
+
+/* ================= icons ================= */
+const ic = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const IC = {
+  home: ic('<path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/>'),
+  bolt: ic('<path d="M13 2L4 14h7l-1 8 9-12h-7z"/>'),
+  cmp: ic('<rect x="3" y="4" width="7" height="16" rx="1.5"/><rect x="14" y="4" width="7" height="16" rx="1.5"/>'),
+  cog: ic('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
+  back: ic('<path d="M15 18l-6-6 6-6"/>'),
+  plus: ic('<path d="M12 5v14M5 12h14"/>'),
+  x: ic('<path d="M6 6l12 12M18 6L6 18"/>'),
+  wifi: ic('<path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0"/><circle cx="12" cy="19.5" r="1"/>'),
+  doc: ic('<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>'),
+  copy: ic('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>'),
+  trash: ic('<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>'),
+  chev: ic('<path d="M9 6l6 6-6 6"/>')
 };
+const LOGO = `<svg viewBox="0 0 64 64" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#b4532a"/><path d="M14 31 32 16l18 15" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 30v18h26V30" fill="none" stroke="#fff" stroke-width="5" stroke-linejoin="round"/><path d="M25 43l6-6 4 4 7-8" fill="none" stroke="#ffd7c2" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
-/* ---------- small helpers ---------- */
-function uid() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID().replace(/-/g, '');
-  return Date.now().toString(16) + Math.random().toString(16).slice(2, 14);
-}
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-function pad2(n) { return (n < 10 ? '0' : '') + n; }
-function todayISO(now) {
-  const d = now || new Date();
-  return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
-}
-function parseISO(s) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s || '');
-  return m ? { y: +m[1], m: +m[2], d: +m[3] } : null;
-}
-/* Add a warranty term. Month-end safe: 31 Jan + 1 month = 28/29 Feb. */
-function addTerm(iso, n, unit) {
-  const p = parseISO(iso);
-  if (!p || !(n > 0)) return null;
-  const months = unit === 'years' ? n * 12 : n;
-  let y = p.y, m = p.m - 1 + months;
-  y += Math.floor(m / 12); m = ((m % 12) + 12) % 12;
-  const last = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
-  return y + '-' + pad2(m + 1) + '-' + pad2(Math.min(p.d, last));
-}
-function daysUntil(iso, now) {
-  const p = parseISO(iso);
-  if (!p) return null;
-  const t = now || new Date();
-  const a = Date.UTC(t.getFullYear(), t.getMonth(), t.getDate());
-  return Math.round((Date.UTC(p.y, p.m - 1, p.d) - a) / 864e5);
-}
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-function fmtDate(iso) {
-  const p = parseISO(iso);
-  return p ? p.d + ' ' + MONTHS[p.m - 1] + ' ' + p.y : '';
-}
-function fmtMoney(n) {
-  if (n === '' || n == null || isNaN(+n)) return '';
-  return new Intl.NumberFormat('en-AU', { style: 'currency', currency: 'AUD' }).format(+n);
-}
-function safeName(s, max) {
-  const out = String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '')
-    .replace(/[^A-Za-z0-9 _-]+/g, '').trim().replace(/\s+/g, '-').slice(0, max || 40);
-  return out || 'Unnamed';
-}
-
-/* ---------- data ---------- */
-let D = null;          // synced data
-let S = null;          // this phone's settings
-function emptyData() {
-  return { schema: 1, items: {}, warranties: {}, files: {}, lists: JSON.parse(JSON.stringify(DEFAULT_LISTS)) };
-}
-function defaultSettings() {
-  return { theme: 'indigo', wifiOnly: true, owner: 'Shaun', lastSync: 0, lastSyncMsg: '' };
-}
-function live(coll) { return Object.values(D[coll]).filter((r) => !r.deleted); }
-function touch(rec) { rec.updatedAt = Date.now(); rec.by = S ? S.owner : ''; return rec; }
-function itemWarranties(itemId) { return live('warranties').filter((w) => w.itemId === itemId); }
-function itemFiles(itemId) { return live('files').filter((f) => f.itemId === itemId); }
-function inboxFiles() { return live('files').filter((f) => !f.itemId || !D.items[f.itemId] || D.items[f.itemId].deleted); }
-function propById(id) { return D.lists.properties.find((p) => p.id === id) || null; }
-function propName(id) { const p = propById(id); return p ? p.name : 'No property'; }
-
-/* Merge another copy of the data into ours: newest record wins, by id. */
-function mergeInto(local, remote) {
-  let changed = false;
-  ['items', 'warranties', 'files'].forEach((c) => {
-    const L = local[c], R = (remote && remote[c]) || {};
-    Object.keys(R).forEach((id) => {
-      if (!L[id] || (R[id].updatedAt || 0) > (L[id].updatedAt || 0)) { L[id] = R[id]; changed = true; }
-    });
-  });
-  if (remote && remote.lists && (remote.lists.updatedAt || 0) > (local.lists.updatedAt || 0)) { local.lists = remote.lists; changed = true; }
-  return changed;
-}
-
-/* ---------- warranty logic ---------- */
-function warrantyStart(w, item) {
-  if (w.startFrom === 'install') return (item && (item.installDate || item.purchaseDate)) || null;
-  if (w.startFrom === 'custom') return w.startDate || null;
-  return (item && item.purchaseDate) || null;
-}
-function warrantyExpiry(w, item) {
-  if (w.termUnit === 'lifetime') return null;
-  if (w.expiryOverride) return w.expiryOverride;
-  return addTerm(warrantyStart(w, item), +w.termValue, w.termUnit);
-}
-function warrantyStatus(w, item, now) {
-  if (w.termUnit === 'lifetime') return { kind: 'life', label: 'Lifetime', expiry: null, days: Infinity };
-  const exp = warrantyExpiry(w, item);
-  if (!exp) return { kind: 'none', label: 'No date', expiry: null, days: null };
-  const d = daysUntil(exp, now);
-  if (d < 0) return { kind: 'gone', label: 'Expired', expiry: exp, days: d };
-  if (d <= 90) return { kind: 'soon', label: d === 0 ? 'Today' : d === 1 ? '1 day' : d + ' days', expiry: exp, days: d };
-  return { kind: 'ok', label: 'Covered', expiry: exp, days: d };
-}
-/* One badge per item. Expiring soon beats everything, then lifetime, covered, expired. */
-function itemStatus(item, ws, now) {
-  const st = ws.map((w) => warrantyStatus(w, item, now));
-  if (!st.length) return { kind: 'nowar', label: 'No warranty' };
-  const soon = st.filter((s) => s.kind === 'soon').sort((a, b) => a.days - b.days);
-  if (soon.length) return soon[0];
-  if (st.some((s) => s.kind === 'life')) return { kind: 'life', label: 'Lifetime' };
-  if (st.some((s) => s.kind === 'ok')) return { kind: 'ok', label: 'Covered' };
-  if (st.some((s) => s.kind === 'gone')) return { kind: 'gone', label: 'Expired' };
-  return { kind: 'none', label: 'No date' };
-}
-/* Archive suggestion: not archived, and either gone from the house or every warranty expired over 2 years ago. */
-function suggestArchive(item, ws, now) {
-  if (item.archived || item.deleted) return false;
-  if (item.status && item.status !== 'Active') return true;
-  if (!ws.length) return false;
-  return ws.every((w) => { const s = warrantyStatus(w, item, now); return s.kind === 'gone' && s.days < -730; });
-}
-
-/* ---------- Dropbox paths ---------- */
-function fileExt(f) {
-  if (f.mime === 'application/pdf') return 'pdf';
-  if (f.mime === 'image/jpeg') return 'jpg';
-  const m = /\.([A-Za-z0-9]{1,5})$/.exec(f.origName || '');
-  return m ? m[1].toLowerCase() : 'bin';
-}
-function fileBaseName(f) {
-  return (f.date || 'nodate') + '_' + (f.store ? safeName(f.store, 24) + '_' : '') + safeName(f.kind || 'File', 16) + '_' + f.id.slice(0, 6) + '.' + fileExt(f);
-}
-function desiredPath(f, data) {
-  const d = data || D;
-  const item = f.itemId ? d.items[f.itemId] : null;
-  if (!item || item.deleted) return '/Inbox/' + fileBaseName(f);
-  const p = (d.lists.properties.find((x) => x.id === item.propertyId) || { name: 'No-property' }).name;
-  const seg = safeName(p, 30) + '/' + safeName(item.name, 40) + '_' + item.id.slice(0, 4);
-  if (item.archived) {
-    const yr = new Date(item.archivedAt || Date.now()).getFullYear();
-    return '/Archive/' + yr + '/' + seg + '/' + fileBaseName(f);
-  }
-  return '/Files/' + seg + '/' + fileBaseName(f);
-}
-function thumbPath(id) { return '/.thumbs/' + id + '.jpg'; }
-
-/* ---------- IndexedDB ---------- */
-const idb = {
-  db: null,
-  open() {
-    return new Promise((res, rej) => {
-      const r = indexedDB.open('ourgear', 1);
-      r.onupgradeneeded = () => {
-        const d = r.result;
-        ['kv', 'blobs', 'thumbs', 'share'].forEach((s) => { if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); });
-      };
-      r.onsuccess = () => { this.db = r.result; res(); };
-      r.onerror = () => rej(r.error);
-    });
-  },
-  run(store, mode, fn) {
-    return new Promise((res, rej) => {
-      const t = this.db.transaction(store, mode);
-      const rq = fn(t.objectStore(store));
-      let out;
-      if (rq) rq.onsuccess = () => { out = rq.result; };
-      t.oncomplete = () => res(out);
-      t.onerror = () => rej(t.error);
-      t.onabort = () => rej(t.error);
-    });
-  },
-  get(st, k) { return this.run(st, 'readonly', (s) => s.get(k)); },
-  put(st, k, v) { return this.run(st, 'readwrite', (s) => s.put(v, k)); },
-  del(st, k) { return this.run(st, 'readwrite', (s) => s.delete(k)); },
-  keys(st) { return this.run(st, 'readonly', (s) => s.getAllKeys()); }
-};
-async function saveData() { await idb.put('kv', 'data', D); scheduleSync(); }
-function saveSettings() { try { localStorage.setItem('og_settings', JSON.stringify(S)); } catch (e) { /* ignore */ } }
-/* ---------- Dropbox (PKCE sign-in, no secret) ---------- */
-const REDIRECT_URI = (typeof location !== 'undefined') ? location.origin + location.pathname.replace(/index\.html$/, '') : '';
-function randStr(n) {
-  const a = new Uint8Array(n); crypto.getRandomValues(a);
-  return Array.from(a, (b) => 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'[b % 66]).join('');
-}
-async function sha256url(s) {
-  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  return btoa(String.fromCharCode.apply(null, new Uint8Array(h))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-function apiArg(o) {
-  return JSON.stringify(o).replace(/[\u007f-￿]/g, (c) => '\\u' + ('000' + c.charCodeAt(0).toString(16)).slice(-4));
-}
-const DBX = {
-  access: null, exp: 0,
-  connected() { return !!localStorage.getItem('og_refresh'); },
-  async connect() {
-    const verifier = randStr(64), state = randStr(16);
-    localStorage.setItem('og_pkce', verifier); localStorage.setItem('og_state', state);
-    const q = new URLSearchParams({ client_id: DROPBOX_KEY, response_type: 'code', code_challenge: await sha256url(verifier),
-      code_challenge_method: 'S256', token_access_type: 'offline', redirect_uri: REDIRECT_URI, state });
-    location.href = 'https://www.dropbox.com/oauth2/authorize?' + q.toString();
-  },
-  async finishSignIn() {
-    const p = new URLSearchParams(location.search);
-    const code = p.get('code');
-    if (!code && !p.get('error')) return false;
-    history.replaceState(null, '', location.pathname + '#/settings');
-    if (!code) { toast('Dropbox sign-in was cancelled'); return true; }
-    if (p.get('state') !== localStorage.getItem('og_state')) { toast('Sign-in check failed. Try again.'); return true; }
-    const body = new URLSearchParams({ code, grant_type: 'authorization_code', code_verifier: localStorage.getItem('og_pkce') || '',
-      client_id: DROPBOX_KEY, redirect_uri: REDIRECT_URI });
-    const r = await fetch('https://api.dropboxapi.com/oauth2/token', { method: 'POST', body });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok || !j.refresh_token) { toast('Dropbox sign-in failed: ' + (j.error_description || r.status)); return true; }
-    localStorage.setItem('og_refresh', j.refresh_token);
-    localStorage.removeItem('og_pkce'); localStorage.removeItem('og_state');
-    this.access = j.access_token; this.exp = Date.now() + (j.expires_in - 60) * 1000;
-    toast('Dropbox connected');
-    return true;
-  },
-  disconnect() { localStorage.removeItem('og_refresh'); this.access = null; },
-  async token() {
-    if (this.access && Date.now() < this.exp) return this.access;
-    const rt = localStorage.getItem('og_refresh');
-    if (!rt) throw new Error('Dropbox not connected');
-    const r = await fetch('https://api.dropboxapi.com/oauth2/token', { method: 'POST',
-      body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: rt, client_id: DROPBOX_KEY }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) { if (r.status === 400 || r.status === 401) this.disconnect(); throw new Error('Dropbox sign-in expired. Connect again in Settings.'); }
-    this.access = j.access_token; this.exp = Date.now() + (j.expires_in - 60) * 1000;
-    return this.access;
-  },
-  async fail(r) {
-    const t = await r.text(); let j = {};
-    try { j = JSON.parse(t); } catch (e) { j = { error_summary: t }; }
-    const e = new Error(j.error_summary || ('Dropbox error ' + r.status)); e.status = r.status; e.summary = j.error_summary || '';
-    throw e;
-  },
-  async rpc(ep, args) {
-    const r = await fetch('https://api.dropboxapi.com/2/' + ep, { method: 'POST',
-      headers: { Authorization: 'Bearer ' + await this.token(), 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
-    if (!r.ok) await this.fail(r);
-    return r.json();
-  },
-  async upload(path, blob, mode) {
-    const r = await fetch('https://content.dropboxapi.com/2/files/upload', { method: 'POST',
-      headers: { Authorization: 'Bearer ' + await this.token(), 'Content-Type': 'application/octet-stream',
-        'Dropbox-API-Arg': apiArg({ path, mode: mode || 'add', autorename: false, mute: true }) }, body: blob });
-    if (!r.ok) await this.fail(r);
-    return r.json();
-  },
-  /* Returns {blob, meta} or null when the file isn't there. */
-  async download(path) {
-    const r = await fetch('https://content.dropboxapi.com/2/files/download', { method: 'POST',
-      headers: { Authorization: 'Bearer ' + await this.token(), 'Dropbox-API-Arg': apiArg({ path }) } });
-    if (r.status === 409) {
-      const t = await r.text();
-      if (/not_found/.test(t)) return null;
-      const e = new Error(t); e.status = 409; e.summary = t; throw e;
-    }
-    if (!r.ok) await this.fail(r);
-    const blob = await r.blob();
-    let meta = JSON.parse(r.headers.get('dropbox-api-result') || '{}');
-    if (!meta.rev) meta = await this.rpc('files/get_metadata', { path });
-    return { blob, meta };
-  },
-  move(from, to) { return this.rpc('files/move_v2', { from_path: from, to_path: to, autorename: false }); },
-  del(path) { return this.rpc('files/delete_v2', { path }); },
-  async exists(path) {
-    try { await this.rpc('files/get_metadata', { path }); return true; } catch (e) { if (/not_found/.test(e.summary)) return false; throw e; }
-  },
-  async link(path) { return (await this.rpc('files/get_temporary_link', { path })).link; }
-};
-
-/* ---------- sync ---------- */
-let syncing = false, syncTimer = null, syncAgain = false;
-function scheduleSync() { clearTimeout(syncTimer); syncTimer = setTimeout(() => sync(false), 4000); }
-function onCellular() { return !!(navigator.connection && navigator.connection.type === 'cellular'); }
-function setSyncMsg(m) { S.lastSyncMsg = m; saveSettings(); const el = document.getElementById('syncmsg'); if (el) el.textContent = syncLabel(); }
-function syncLabel() {
-  if (!DBX.connected()) return 'Not synced';
-  if (syncing) return 'Syncing…';
-  if (S.lastSyncMsg && S.lastSyncMsg !== 'ok') return S.lastSyncMsg;
-  if (!S.lastSync) return 'Not synced yet';
-  const mins = Math.round((Date.now() - S.lastSync) / 60000);
-  return mins < 1 ? 'Synced just now' : mins < 60 ? 'Synced ' + mins + ' min ago' : 'Synced ' + new Date(S.lastSync).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
-}
-async function sync(manual) {
-  if (!DBX.connected() || !navigator.onLine) { if (manual) toast(navigator.onLine ? 'Connect Dropbox in Settings first' : 'No internet connection'); return; }
-  if (!manual && S.wifiOnly && onCellular()) return;
-  if (syncing) { syncAgain = true; return; }
-  syncing = true; setSyncMsg('Syncing…');
-  try {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const remote = await DBX.download(DATA_PATH);
-      let remoteText = null, rev = null;
-      if (remote) {
-        remoteText = await remote.blob.text(); rev = remote.meta.rev;
-        const rd = JSON.parse(remoteText);
-        if (mergeInto(D, rd)) await idb.put('kv', 'data', D);
-      }
-      await reconcileFiles();
-      await idb.put('kv', 'data', D);
-      const text = JSON.stringify(D);
-      if (text === remoteText) break;
-      try {
-        await DBX.upload(DATA_PATH, new Blob([text], { type: 'application/json' }), rev ? { '.tag': 'update', update: rev } : { '.tag': 'add' });
-        break;
-      } catch (e) {
-        if (e.status === 409 && attempt < 2) continue; // the other phone saved first: pull again and merge
-        throw e;
-      }
-    }
-    S.lastSync = Date.now(); syncing = false; setSyncMsg('ok');
-    if (manual) toast('Synced');
-    render();
-  } catch (e) {
-    syncing = false; setSyncMsg('Sync failed: ' + e.message.slice(0, 80));
-    if (manual) toast('Sync failed: ' + e.message.slice(0, 120));
-  } finally {
-    syncing = false;
-    if (syncAgain) { syncAgain = false; scheduleSync(); }
-  }
-}
-/* Upload new files, move files whose place changed (filed, renamed, archived), delete removed ones. */
-async function reconcileFiles() {
-  for (const f of Object.values(D.files)) {
-    if (f.deleted) {
-      if (f.path && !f.remoteGone) {
-        try { await DBX.del(f.path); } catch (e) { if (!/not_found/.test(e.summary)) throw e; }
-        try { await DBX.del(thumbPath(f.id)); } catch (e) { /* no thumb */ }
-        f.remoteGone = true; touch(f);
-      }
-      await idb.del('blobs', f.id);
-      continue;
-    }
-    const want = desiredPath(f);
-    if (!f.uploaded) {
-      const blob = await idb.get('blobs', f.id);
-      if (!blob) continue; // added on the other phone; it will upload it
-      let res;
-      try { res = await DBX.upload(want, blob, 'add'); }
-      catch (e) { if (/conflict/.test(e.summary)) res = { path_display: want }; else throw e; }
-      const th = await idb.get('thumbs', f.id);
-      if (th) await DBX.upload(thumbPath(f.id), th, 'overwrite');
-      f.path = res.path_display; f.uploaded = true; touch(f);
-      await idb.del('blobs', f.id);
-      continue;
-    }
-    if (f.path && f.path.toLowerCase() !== want.toLowerCase()) {
-      try { await DBX.move(f.path, want); f.path = want; touch(f); }
-      catch (e) {
-        if (/not_found|conflict/.test(e.summary) && await DBX.exists(want)) { f.path = want; touch(f); }
-        else if (!/not_found/.test(e.summary)) throw e;
-      }
-    }
-  }
-}
-
-/* ---------- thumbnails ---------- */
-const thumbUrls = {};
-async function thumbUrl(f) {
-  if (thumbUrls[f.id]) return thumbUrls[f.id];
-  let b = await idb.get('thumbs', f.id);
-  if (!b && f.uploaded && f.mime !== 'application/pdf' && DBX.connected() && navigator.onLine) {
-    const item = f.itemId && D.items[f.itemId];
-    if (item && item.archived) return null;
-    try { const r = await DBX.download(thumbPath(f.id)); if (r) { b = r.blob; await idb.put('thumbs', f.id, b); } } catch (e) { /* offline */ }
-  }
-  if (!b) return null;
-  thumbUrls[f.id] = URL.createObjectURL(b);
-  return thumbUrls[f.id];
-}
-async function dropThumb(id) {
-  if (thumbUrls[id]) { URL.revokeObjectURL(thumbUrls[id]); delete thumbUrls[id]; }
-  await idb.del('thumbs', id);
-}
-async function hydrateThumbs() {
-  const imgs = document.querySelectorAll('img[data-thumb]');
-  for (const img of imgs) {
-    const f = D.files[img.dataset.thumb];
-    if (!f) continue;
-    const u = await thumbUrl(f);
-    if (u && img.isConnected) img.src = u;
-  }
-}
-/* Open the full file: local copy if not yet uploaded, otherwise a short-lived Dropbox link. */
-async function openFile(f) {
-  const blob = await idb.get('blobs', f.id);
-  if (blob) { window.open(URL.createObjectURL(blob), '_blank'); return; }
-  if (!f.uploaded) { toast('This file is still on the other phone. It appears after that phone syncs.'); return; }
-  if (!DBX.connected() || !navigator.onLine) { toast('Needs internet and Dropbox to open the full file'); return; }
-  const w = window.open('', '_blank');
-  try { const link = await DBX.link(f.path); if (w) w.location = link; else location.href = link; }
-  catch (e) { if (w) w.close(); toast('Could not open: ' + e.message.slice(0, 100)); }
-}
-/* ---------- images: crop, rotate, straighten, document clean-up, compression ---------- */
-function newCanvas(w, h) { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; }
-async function loadSource(file) {
-  let bmp;
-  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
-  catch (e) {
-    bmp = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); });
-  }
-  const w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
-  const s = Math.min(1, 2400 / Math.max(w, h));
-  const c = newCanvas(w * s, h * s);
-  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-  return c;
-}
-function rotateCanvas(src, quarter, deg) {
-  const ang = ((quarter * 90) + deg) * Math.PI / 180;
-  const w = src.width, h = src.height, cos = Math.abs(Math.cos(ang)), sin = Math.abs(Math.sin(ang));
-  const c = newCanvas(w * cos + h * sin, w * sin + h * cos);
-  const x = c.getContext('2d');
-  x.fillStyle = '#FFFFFF'; x.fillRect(0, 0, c.width, c.height);
-  x.translate(c.width / 2, c.height / 2); x.rotate(ang); x.drawImage(src, -w / 2, -h / 2);
-  return c;
-}
-/* Greyscale, stretch paper to white and ink to black. Helps faded thermal receipts. */
-function documentFilter(c) {
-  const x = c.getContext('2d');
-  const im = x.getImageData(0, 0, c.width, c.height), d = im.data, hist = new Uint32Array(256);
-  for (let i = 0; i < d.length; i += 4) { const g = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 | 0; d[i] = g; hist[g]++; }
-  const total = d.length / 4;
-  let acc = 0, lo = 0, hi = 255;
-  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > total * 0.02) { lo = v; break; } }
-  acc = 0;
-  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > total * 0.25) { hi = v; break; } }
-  if (hi - lo < 30) { lo = Math.max(0, hi - 30); }
-  const lut = new Uint8Array(256);
-  for (let v = 0; v < 256; v++) { const t = Math.min(1, Math.max(0, (v - lo) / (hi - lo))); lut[v] = Math.round(255 * Math.pow(t, 1.6)); }
-  for (let i = 0; i < d.length; i += 4) { const g = lut[d[i]]; d[i] = d[i + 1] = d[i + 2] = g; }
-  x.putImageData(im, 0, 0);
-}
-function canvasBlob(c, q) { return new Promise((res) => c.toBlob(res, 'image/jpeg', q)); }
-function scaledCopy(src, maxSide) {
-  const s = Math.min(1, maxSide / Math.max(src.width, src.height));
-  const c = newCanvas(src.width * s, src.height * s), x = c.getContext('2d');
-  x.imageSmoothingQuality = 'high'; x.drawImage(src, 0, 0, c.width, c.height);
-  return c;
-}
-/* Final saved image: receipts in black and white (smaller), photos in colour. */
-async function finishImage(work, crop, docMode) {
-  const cut = newCanvas(crop.w, crop.h);
-  cut.getContext('2d').drawImage(work, crop.x, crop.y, crop.w, crop.h, 0, 0, cut.width, cut.height);
-  const out = scaledCopy(cut, 1600);
-  if (docMode) documentFilter(out);
-  const full = await canvasBlob(out, docMode ? 0.6 : 0.78);
-  const thumb = await canvasBlob(scaledCopy(out, 320), 0.7);
-  return { full, thumb };
-}
-/* A shared image goes straight to the inbox: colour, compressed, no crop. */
-async function quickCompress(file) {
-  const src = await loadSource(file);
-  return finishImage(src, { x: 0, y: 0, w: src.width, h: src.height }, false);
-}
-
-/* ---------- crop screen state ---------- */
-let SNAP = null; // { step, file, isPdf, src, quarter, deg, docMode, work, crop, view, itemId, result }
-async function startSnap(file, itemId) {
-  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
-  SNAP = { step: isPdf ? 'details' : 'crop', file, isPdf, quarter: 0, deg: 0, docMode: true, itemId: itemId || null,
-    kind: isPdf ? 'Tax invoice' : 'Receipt', date: todayISO(), store: '', total: '' };
-  if (!isPdf) {
-    try { SNAP.src = await loadSource(file); }
-    catch (e) { toast('Could not read that image'); SNAP = null; return; }
-    rebuildWork();
-  }
-  go('#/snap');
-}
-function rebuildWork() {
-  SNAP.work = rotateCanvas(SNAP.src, SNAP.quarter, SNAP.deg);
-  const m = Math.round(Math.min(SNAP.work.width, SNAP.work.height) * 0.04);
-  SNAP.crop = { x: m, y: m, w: SNAP.work.width - 2 * m, h: SNAP.work.height - 2 * m };
-}
-function drawCropView() {
-  const wrap = document.getElementById('cropwrap');
-  if (!wrap || !SNAP || !SNAP.work) return;
-  const maxW = Math.min(wrap.parentElement.clientWidth, 600), maxH = Math.max(260, window.innerHeight - 330);
-  const s = Math.min(maxW / SNAP.work.width, maxH / SNAP.work.height);
-  SNAP.view = s;
-  const cv = document.getElementById('cropcanvas');
-  cv.width = Math.round(SNAP.work.width * s); cv.height = Math.round(SNAP.work.height * s);
-  cv.getContext('2d').drawImage(SNAP.work, 0, 0, cv.width, cv.height);
-  wrap.style.width = cv.width + 'px'; wrap.style.height = cv.height + 'px';
-  placeCropRect();
-}
-function placeCropRect() {
-  const r = document.getElementById('croprect'), s = SNAP.view, c = SNAP.crop;
-  r.style.left = c.x * s + 'px'; r.style.top = c.y * s + 'px'; r.style.width = c.w * s + 'px'; r.style.height = c.h * s + 'px';
-}
-function bindCropDrag() {
-  const wrap = document.getElementById('cropwrap');
-  if (!wrap) return;
-  let drag = null;
-  wrap.addEventListener('pointerdown', (e) => {
-    const h = e.target.closest('.h'), inRect = e.target.closest('#croprect');
-    if (!h && !inRect) return;
-    e.preventDefault();
-    drag = { mode: h ? h.dataset.c : 'move', x: e.clientX, y: e.clientY, start: Object.assign({}, SNAP.crop) };
-    wrap.setPointerCapture(e.pointerId);
-  });
-  wrap.addEventListener('pointermove', (e) => {
-    if (!drag) return;
-    const s = SNAP.view, dx = (e.clientX - drag.x) / s, dy = (e.clientY - drag.y) / s;
-    const W = SNAP.work.width, H = SNAP.work.height, min = 60 / s, st = drag.start;
-    let { x, y, w, h } = st;
-    if (drag.mode === 'move') {
-      x = Math.min(Math.max(0, st.x + dx), W - st.w); y = Math.min(Math.max(0, st.y + dy), H - st.h);
-    } else {
-      let x2 = st.x + st.w, y2 = st.y + st.h;
-      if (drag.mode.includes('l')) x = Math.min(Math.max(0, st.x + dx), x2 - min);
-      if (drag.mode.includes('r')) x2 = Math.max(Math.min(W, x2 + dx), x + min);
-      if (drag.mode.includes('t')) y = Math.min(Math.max(0, st.y + dy), y2 - min);
-      if (drag.mode.includes('b')) y2 = Math.max(Math.min(H, y2 + dy), y + min);
-      w = x2 - x; h = y2 - y;
-    }
-    SNAP.crop = { x, y, w, h };
-    placeCropRect();
-  });
-  const end = () => { drag = null; };
-  wrap.addEventListener('pointerup', end); wrap.addEventListener('pointercancel', end);
-}
-/* ---------- UI helpers ---------- */
-const $ = (sel) => document.querySelector(sel);
-function toast(msg) {
-  const t = $('#toast'); if (!t) return;
-  t.textContent = msg; t.hidden = false;
-  clearTimeout(toast.tm); toast.tm = setTimeout(() => { t.hidden = true; }, 3200);
-}
-function go(hash) { if (location.hash === hash) render(); else location.hash = hash; }
-function groupBy(arr, key) { const o = {}; arr.forEach((x) => { (o[x[key]] = o[x[key]] || []).push(x); }); return o; }
-function badge(st) { return '<span class="badge b-' + st.kind + '">' + esc(st.label) + '</span>'; }
-function opt(v, cur, label) { return '<option value="' + esc(v) + '"' + (String(v) === String(cur == null ? '' : cur) ? ' selected' : '') + '>' + esc(label == null ? v : label) + '</option>'; }
-const I = {
-  back: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
-  home: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-7 8 7v9H4z"/></svg>',
-  list: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>',
-  cam: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
-  inbox: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 13l3-8h10l3 8v6H4z"/><path d="M4 13h5l1 2h4l1-2h5"/></svg>',
-  gear: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
-  plus: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
-  search: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>',
-  sync: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>'
-};
-function logoSVG(size) {
-  const fg = 'fill:var(--logo-fg)', st = 'fill:none;stroke:var(--logo-fg);stroke-linecap:round;stroke-linejoin:round', kn = 'fill:var(--hdr-bg)';
-  let teeth = '';
-  for (let i = 0; i < 8; i++) teeth += '<rect x="341" y="312" width="22" height="26" rx="4" style="' + fg + '" transform="rotate(' + (i * 45) + ' 352 372)"/>';
-  const rec = 'M198 328 H302 V442 L285 428 L267 442 L250 428 L232 442 L215 428 L198 442 Z';
-  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 512 512" role="img" aria-label="Our Gear logo">' +
-    '<path d="M256 76 L396 124 V244 C396 336 338 394 256 418 C174 394 116 336 116 244 V124 Z" style="' + st + ';stroke-width:26"/>' +
-    '<path d="M160 256 L250 178 L322 240" style="' + st + ';stroke-width:24"/>' +
-    '<path d="M316 176 L338 198 L372 156" style="' + st + ';stroke-width:26"/>' +
-    [[186, 256], [218, 256], [186, 288], [218, 288]].map((p) => '<rect x="' + p[0] + '" y="' + p[1] + '" width="26" height="26" rx="4" style="' + fg + '"/>').join('') +
-    '<path d="' + rec + '" style="' + kn + ';stroke:var(--hdr-bg);stroke-width:44;stroke-linejoin:round"/>' +
-    '<path d="' + rec + '" style="' + kn + ';stroke:var(--logo-fg);stroke-width:20;stroke-linejoin:round"/>' +
-    '<path d="M226 362 H278 M226 390 H278" style="' + st + ';stroke-width:14"/>' +
-    '<circle cx="352" cy="372" r="68" style="' + kn + '"/>' + teeth +
-    '<circle cx="352" cy="372" r="42" style="' + fg + '"/><circle cx="352" cy="372" r="17" style="' + kn + '"/></svg>';
-}
-function header(title, opts) {
-  const o = opts || {};
-  return '<header class="hdr"><div class="hdr-row">' +
-    (o.back ? '<a class="iconbtn" href="' + esc(o.back) + '" aria-label="Back">' + I.back + '</a>' : (o.logo ? logoSVG(36) : '')) +
-    '<div style="flex:1;min-width:0"><h1>' + esc(title) + '</h1>' + (o.sub ? '<div class="sub">' + esc(o.sub) + '</div>' : '') + '</div>' +
-    (o.right || '') + '</div>' + (o.extra || '') + '</header>';
-}
-function nav(active) {
-  const n = inboxFiles().length;
-  const a = (id, href, icon, label, cls) => '<a href="' + href + '"' + (active === id ? ' aria-current="page"' : '') + (cls ? ' class="' + cls + '"' : '') + '>' + icon + label + '</a>';
-  return '<nav class="nav">' + a('home', '#/home', I.home, 'Home') + a('items', '#/items', I.list, 'Items') +
-    a('snap', '#/snap', '<span class="ring">' + I.cam + '</span>', 'Snap', 'snap') +
-    '<a href="#/inbox"' + (active === 'inbox' ? ' aria-current="page"' : '') + '>' + I.inbox + 'Inbox' + (n ? '<span class="dot">' + n + '</span>' : '') + '</a>' +
-    a('settings', '#/settings', I.gear, 'Settings') + '</nav>';
-}
-function syncButton() {
-  return '<button class="iconbtn" data-act="syncnow" aria-label="Sync now">' + I.sync + '</button>';
-}
-
-/* ---------- views ---------- */
-let ITEMS_F = { q: '', prop: 'all', cat: '', arch: false };
-let ITEM_TAB = 'details';
-let SNAP_TARGET = null;
-
-function viewHome() {
-  const items = live('items').filter((i) => !i.archived);
-  const byItem = groupBy(live('warranties'), 'itemId');
-  const soon = []; let life = 0;
-  items.forEach((it) => (byItem[it.id] || []).forEach((w) => {
-    const s = warrantyStatus(w, it);
-    if (s.kind === 'soon') soon.push({ it, w, s });
-    if (s.kind === 'life') life++;
-  }));
-  soon.sort((a, b) => a.s.days - b.s.days);
-  const sugg = items.filter((i) => suggestArchive(i, byItem[i.id] || []));
-  const inbox = inboxFiles().length;
-  let h = header('Our Gear', { logo: true, right: '<div class="sync" id="syncmsg">' + esc(syncLabel()) + '</div>' + syncButton() });
-  h += '<main>';
-  h += '<a class="btn primary big" href="#/snap">' + I.cam + 'Snap a receipt</a>';
-  h += '<div class="stats">' +
-    '<a class="stat" href="#/inbox"><div class="l">Inbox to file</div><div class="n">' + inbox + '</div></a>' +
-    '<a class="stat" href="#/items"><div class="l">Expiring in 90 days</div><div class="n" style="color:#8A5A00">' + soon.length + '</div></a>' +
-    '<a class="stat" href="#/items"><div class="l">Items</div><div class="n">' + items.length + '</div></a>' +
-    '<a class="stat" href="#/items"><div class="l">Lifetime warranties</div><div class="n">' + life + '</div></a></div>';
-  h += '<section class="section"><div class="section-head"><h2>Expiring soon</h2></div>';
-  if (soon.length) {
-    h += '<div class="card list">' + soon.slice(0, 6).map((x) =>
-      '<a class="row" href="#/item/' + x.it.id + '"><div class="grow"><div class="t">' + esc(x.it.name) + '</div><div class="s">' +
-      esc((x.w.type || 'Warranty') + (x.w.covers ? ' (' + x.w.covers + ')' : '') + ' · ends ' + fmtDate(x.s.expiry)) + '</div></div>' + badge(x.s) + '</a>').join('') + '</div>';
-  } else h += '<div class="card empty">Nothing expiring in the next 90 days.</div>';
-  h += '</section>';
-  if (sugg.length) {
-    h += '<a class="card pad row" href="#/suggest" style="border-bottom:1px solid var(--border)"><div class="grow"><div class="t">' + sugg.length + ' item' + (sugg.length > 1 ? 's' : '') + ' could be archived</div>' +
-      '<div class="s">Gone from the house, or warranties ended over 2 years ago</div></div><span class="badge b-arch">Review</span></a>';
-  }
-  if (!DBX.connected()) h += '<div class="warn">Dropbox isn\'t connected, so nothing is backed up yet. <a href="#/settings">Connect in Settings</a>.</div>';
-  return h + '</main>' + nav('home');
-}
-
-function filteredItems() {
-  const q = ITEMS_F.q.trim().toLowerCase();
-  const byItem = groupBy(live('warranties'), 'itemId');
-  return live('items').filter((i) => (ITEMS_F.arch || !i.archived) &&
-    (ITEMS_F.prop === 'all' || i.propertyId === ITEMS_F.prop) && (!ITEMS_F.cat || i.category === ITEMS_F.cat) &&
-    (!q || [i.name, i.brand, i.model, i.serial, i.store, i.notes, i.location, i.spot].some((v) => v && String(v).toLowerCase().includes(q))))
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((i) => ({ i, st: i.archived ? { kind: 'arch', label: 'Archived' } : itemStatus(i, byItem[i.id] || []) }));
-}
-function itemsListHTML() {
-  const rows = filteredItems();
-  if (!rows.length) return '<div class="card empty">' + (live('items').length ? 'No items match.' : 'No items yet. Snap a receipt or tap + to add one.') + '</div>';
-  return '<div class="card list">' + rows.map(({ i, st }) =>
-    '<a class="row" href="#/item/' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
-    esc([i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : '')].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>';
-}
-function viewItems() {
-  const props = D.lists.properties;
-  let h = header('Items', { right: '<a class="iconbtn" href="#/new" aria-label="Add item" style="background:var(--accent);color:var(--accent-ink)">' + I.plus + '</a>' });
-  h += '<main><label class="search">' + I.search + '<span class="sr">Search</span><input id="q" type="search" placeholder="Name, brand, model, serial, store" value="' + esc(ITEMS_F.q) + '"></label>';
-  h += '<div class="chips">' + '<button class="chip" data-act="fprop" data-v="all" aria-pressed="' + (ITEMS_F.prop === 'all') + '">All</button>' +
-    props.map((p) => '<button class="chip" data-act="fprop" data-v="' + esc(p.id) + '" aria-pressed="' + (ITEMS_F.prop === p.id) + '">' + esc(p.name) + '</button>').join('') +
-    '<button class="chip" data-act="farch" aria-pressed="' + ITEMS_F.arch + '">Include archived</button></div>';
-  h += '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label>';
-  h += '<div id="itemlist">' + itemsListHTML() + '</div></main>';
-  return h + nav('items');
-}
-
-function viewItem(id) {
-  const it = D.items[id];
-  if (!it || it.deleted) return header('Not found', { back: '#/items' }) + '<main><div class="card empty">This item was deleted.</div></main>' + nav('items');
-  const p = propById(it.propertyId);
-  const tabs = '<div class="tabs" role="tablist">' + ['details', 'warranties', 'files'].map((t) =>
-    '<button role="tab" data-act="tab" data-v="' + t + '" aria-selected="' + (ITEM_TAB === t) + '">' + t[0].toUpperCase() + t.slice(1) + '</button>').join('') + '</div>';
-  let h = header(it.name, { back: '#/items', sub: [it.brand, it.model].filter(Boolean).join(' ') + (it.brand || it.model ? ' · ' : '') + propName(it.propertyId) + (it.location ? ', ' + it.location : ''), extra: tabs });
-  h += '<main>';
-  if (it.archived) h += '<div class="note">Archived. Files are in the Dropbox archive folder and still searchable. <button class="btn quiet" style="margin-top:8px;width:100%" data-act="restore" data-id="' + id + '">Restore</button></div>';
-  if (ITEM_TAB === 'details') {
-    const kv = [['Category', it.category], ['Brand', it.brand], ['Model', it.model], ['Serial', it.serial],
-      ['Property', p ? p.name + ' (' + p.type + ')' : ''], ['Location', it.location], ['Exact spot', it.spot], ['Owner', it.owner],
-      ['Store', it.store], ['Purchased', fmtDate(it.purchaseDate)], ['Installed', fmtDate(it.installDate)], ['Price paid', fmtMoney(it.price)],
-      ['Replacement value', fmtMoney(it.replacementValue)], ['Status', it.status || 'Active'], ['Work deduction', it.work ? 'Yes' : ''], ['Notes', it.notes]]
-      .filter((r) => r[1]);
-    h += '<div class="card kv">' + kv.map((r) => '<div>' + esc(r[0]) + '</div><div style="white-space:pre-line">' + esc(r[1]) + '</div>').join('') + '</div>';
-    h += '<div class="btns"><a class="btn primary" href="#/item/' + id + '/edit">Edit</a>' +
-      (it.archived ? '<button class="btn" data-act="restore" data-id="' + id + '">Restore</button>' : '<button class="btn" data-act="archive" data-id="' + id + '">Archive</button>') + '</div>';
-    h += '<button class="btn danger" data-act="delitem" data-id="' + id + '">Delete item</button>';
-  } else if (ITEM_TAB === 'warranties') {
-    const ws = itemWarranties(id);
-    const sts = ws.map((w) => warrantyStatus(w, it));
-    h += ws.map((w, n) => {
-      const s = sts[n];
-      const term = w.termUnit === 'lifetime' ? 'Lifetime' : (w.termValue ? w.termValue + ' ' + (w.termUnit === 'years' ? (+w.termValue === 1 ? 'year' : 'years') : (+w.termValue === 1 ? 'month' : 'months')) : 'No term set');
-      const from = w.startFrom === 'install' ? 'from install' : w.startFrom === 'custom' ? 'from ' + fmtDate(w.startDate) : 'from purchase';
-      return '<a class="card pad" href="#/warranty/' + id + '/' + w.id + '" style="display:flex;flex-direction:column;gap:6px;text-decoration:none;color:var(--text)">' +
-        '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span class="t" style="font-weight:700">' + esc((w.type || 'Warranty') + ' warranty') + '</span>' + badge(s) + '</div>' +
-        '<div class="muted">' + esc((w.covers || 'Whole item') + ' · ' + term + (w.termUnit === 'lifetime' ? '' : ' ' + from)) + '</div>' +
-        (s.expiry ? '<div style="font-size:14px">' + (s.kind === 'gone' ? 'Ended ' : 'Ends ') + esc(fmtDate(s.expiry)) + '</div>' : '') +
-        (w.provider ? '<div class="muted">' + esc(w.provider + (w.contact ? ' · ' + w.contact : '')) + '</div>' : '') +
-        (w.conditions ? '<div class="muted" style="white-space:pre-line">' + esc(w.conditions) + '</div>' : '') + '</a>';
-    }).join('');
-    if (!ws.length) h += '<div class="card empty">No warranties recorded.</div>';
-    h += '<a class="btn primary" href="#/warranty/' + id + '/new">Add warranty</a>';
-    if (sts.some((s) => s.kind === 'life') && !itemFiles(id).some((f) => f.kind === 'Receipt' || f.kind === 'Tax invoice'))
-      h += '<div class="warn">Lifetime warranty with no receipt saved. A lifetime claim needs proof of purchase, so add the receipt.</div>';
-    if (sts.some((s) => s.kind === 'gone')) h += '<div class="note">After a maker\'s warranty ends, Australian Consumer Law guarantees may still apply.</div>';
-  } else {
-    const fs = itemFiles(id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    h += fs.length ? '<div class="inbox-grid">' + fs.map(fileTile).join('') + '</div>' : '<div class="card empty">No files yet.</div>';
-    h += '<button class="btn primary" data-act="addfile" data-id="' + id + '">Add receipt or file</button>';
-  }
-  return h + '</main>' + nav('items');
-}
-function fileTile(f) {
-  const pic = f.mime === 'application/pdf' ? '<div class="ph">PDF</div>' : '<img data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
-  return '<button data-act="filesheet" data-id="' + f.id + '">' + pic + '<div class="cap">' + esc(f.kind) + '</div><div class="cap">' + esc(fmtDate(f.date) || 'No date') + (f.store ? ' · ' + esc(f.store) : '') + '</div></button>';
-}
-
-function viewItemEdit(id) {
-  const isNew = !id;
-  const it = isNew ? Object.assign({ propertyId: (D.lists.properties[0] || {}).id, owner: S.owner === 'Lyndsey' ? 'Lyndsey' : 'Shared', status: 'Active' }, NEW_ITEM_PREFILL || {}) : D.items[id];
-  if (!it) return viewItems();
-  const stores = Array.from(new Set(live('items').map((i) => i.store).concat(live('files').map((f) => f.store)).filter(Boolean))).sort();
-  const f = (name, label, val, type, extra) => '<label class="field' + (extra === 'req' ? ' req' : '') + '"><span>' + label + '</span><input name="' + name + '" type="' + (type || 'text') + '" value="' + esc(val == null ? '' : val) + '"' + (type === 'number' ? ' inputmode="decimal" step="0.01" min="0"' : '') + (extra && extra !== 'req' ? ' ' + extra : '') + (extra === 'req' ? ' required' : '') + '></label>';
-  let h = header(isNew ? 'New item' : 'Edit item', { back: isNew ? '#/items' : '#/item/' + id });
-  h += '<main><form class="form" data-form="item" data-id="' + esc(id || '') + '">';
-  h += f('name', 'Item name', it.name, 'text', 'req');
-  h += '<label class="field"><span>Category</span><select name="category">' + opt('', it.category, 'Choose…') + D.lists.categories.map((c) => opt(c, it.category)).join('') + '</select></label>';
-  h += '<div class="grid2">' + f('brand', 'Brand', it.brand) + f('model', 'Model', it.model) + '</div>';
-  h += f('serial', 'Serial number', it.serial);
-  h += '<label class="field"><span>Property</span><select name="propertyId">' + D.lists.properties.map((p) => opt(p.id, it.propertyId, p.name + ' (' + p.type + ')')).join('') + '</select></label>';
-  h += '<div class="grid2"><label class="field"><span>Location</span><input name="location" list="locs" value="' + esc(it.location || '') + '" placeholder="Living"></label>' +
-    '<label class="field"><span>Owner</span><select name="owner">' + OWNERS.map((o) => opt(o, it.owner)).join('') + '</select></label></div>';
-  h += '<datalist id="locs">' + D.lists.locations.map((l) => '<option value="' + esc(l) + '">').join('') + '</datalist>';
-  h += f('spot', 'Exact spot', it.spot, 'text', 'placeholder="Indoor unit north wall, outdoor unit side path"');
-  h += '<label class="field"><span>Store</span><input name="store" list="stores" value="' + esc(it.store || '') + '"></label><datalist id="stores">' + stores.map((s) => '<option value="' + esc(s) + '">').join('') + '</datalist>';
-  h += '<div class="grid2">' + f('purchaseDate', 'Purchase date', it.purchaseDate, 'date') + f('installDate', 'Install date', it.installDate, 'date') + '</div>';
-  h += '<div class="grid2">' + f('price', 'Price paid (AUD)', it.price, 'number') + f('replacementValue', 'Replacement value (AUD)', it.replacementValue, 'number') + '</div>';
-  h += '<label class="field"><span>Status</span><select name="status">' + ITEM_STATUS.map((s) => opt(s, it.status || 'Active')).join('') + '</select></label>';
-  h += '<label class="check"><input type="checkbox" name="work"' + (it.work ? ' checked' : '') + '> Work deduction (for Our Tax)</label>';
-  h += '<label class="field"><span>Notes</span><textarea name="notes">' + esc(it.notes || '') + '</textarea></label>';
-  h += '<button class="btn primary big" type="submit">' + (isNew ? 'Add item' : 'Save') + '</button></form></main>';
-  return h + nav('items');
-}
-let NEW_ITEM_PREFILL = null;
-
-function viewWarranty(itemId, wid) {
-  const it = D.items[itemId];
-  if (!it) return viewItems();
-  const isNew = wid === 'new';
-  const w = isNew ? { type: 'Maker', startFrom: 'purchase', termUnit: 'years', termValue: '' } : D.warranties[wid];
-  if (!w) return viewItem(itemId);
-  let h = header(isNew ? 'Add warranty' : 'Edit warranty', { back: '#/item/' + itemId, sub: it.name });
-  h += '<main><form class="form" data-form="warranty" data-item="' + itemId + '" data-id="' + esc(isNew ? '' : wid) + '">';
-  h += '<div class="grid2"><label class="field"><span>Type</span><select name="type">' + D.lists.warrantyTypes.map((t) => opt(t, w.type)).join('') + '</select></label>' +
-    '<label class="field"><span>Covers</span><input name="covers" value="' + esc(w.covers || '') + '" placeholder="Whole item"></label></div>';
-  h += '<div class="grid2"><label class="field"><span>Term</span><input name="termValue" type="number" inputmode="numeric" min="0" step="1" value="' + esc(w.termValue || '') + '"></label>' +
-    '<label class="field"><span>Unit</span><select name="termUnit">' + opt('years', w.termUnit, 'Years') + opt('months', w.termUnit, 'Months') + opt('lifetime', w.termUnit, 'Lifetime') + '</select></label></div>';
-  h += '<label class="field"><span>Starts from</span><select name="startFrom">' + opt('purchase', w.startFrom, 'Purchase date') + opt('install', w.startFrom, 'Install date') + opt('custom', w.startFrom, 'Another date') + '</select></label>';
-  h += '<label class="field"><span>Start date (if another date)</span><input name="startDate" type="date" value="' + esc(w.startDate || '') + '"></label>';
-  h += '<label class="field"><span>Expiry date override (leave blank to work it out)</span><input name="expiryOverride" type="date" value="' + esc(w.expiryOverride || '') + '"></label>';
-  h += '<div class="grid2"><label class="field"><span>Provider</span><input name="provider" value="' + esc(w.provider || '') + '"></label>' +
-    '<label class="field"><span>Phone or website</span><input name="contact" value="' + esc(w.contact || '') + '"></label></div>';
-  h += '<label class="field"><span>Conditions</span><textarea name="conditions" placeholder="Original purchaser only, registration needed, parts only…">' + esc(w.conditions || '') + '</textarea></label>';
-  h += '<div class="muted" id="wpreview"></div>';
-  h += '<button class="btn primary big" type="submit">Save warranty</button>';
-  if (!isNew) h += '<button class="btn danger" type="button" data-act="delwarranty" data-id="' + wid + '">Delete warranty</button>';
-  h += '</form></main>';
-  return h + nav('items');
-}
-
-function viewInbox() {
-  const fs = inboxFiles().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  let h = header('Inbox', { sub: fs.length ? fs.length + ' to file' : 'All filed' });
-  h += '<main>';
-  h += fs.length ? '<div class="inbox-grid">' + fs.map(fileTile).join('') + '</div>' : '<div class="card empty">Nothing waiting. Snap a receipt, or share a PDF or photo to Our Gear from another app.</div>';
-  return h + '</main>' + nav('inbox');
-}
-
-function viewSnap() {
-  if (!SNAP) {
-    const target = SNAP_TARGET && D.items[SNAP_TARGET];
-    let h = header(target ? 'Add file' : 'Snap', { back: target ? '#/item/' + target.id : '', sub: target ? target.name : 'Receipts, invoices, manuals and photos' });
-    h += '<main><div class="snapstart">' +
-      '<label class="btn primary big" for="camIn">' + I.cam + 'Take photo</label><input id="camIn" class="sr" type="file" accept="image/*" capture="environment">' +
-      '<label class="btn big" for="pickIn">Choose photo or PDF</label><input id="pickIn" class="sr" type="file" accept="image/*,application/pdf">' +
-      '<p class="muted">Tip: snap thermal receipts on the day. They fade.</p></div></main>';
-    return h + nav('snap');
-  }
-  if (SNAP.step === 'crop') {
-    let h = header('Crop', { right: '<button class="iconbtn" data-act="snapcancel" aria-label="Cancel" style="font-size:14px;width:auto;padding:0 8px">Cancel</button>' });
-    h += '<main><div class="snapbody">' +
-      '<div id="cropwrap" class="cropwrap"><canvas id="cropcanvas"></canvas><div id="croprect" class="croprect">' +
-      '<span class="h tl" data-c="tl"></span><span class="h tr" data-c="tr"></span><span class="h bl" data-c="bl"></span><span class="h br" data-c="br"></span></div></div>' +
-      '<div class="btns three"><button class="darkbtn" data-act="rot">Rotate</button><button class="darkbtn" data-act="cropall">Full photo</button>' +
-      '<button class="darkbtn" data-act="docmode" aria-pressed="' + SNAP.docMode + '">Document</button></div>' +
-      '<label class="slider">Straighten<input id="deg" type="range" min="-15" max="15" step="0.5" value="' + SNAP.deg + '"><span id="degv">' + SNAP.deg + '°</span></label>' +
-      '<button class="btn primary big" data-act="cropnext">Next</button></div></main>';
-    return h + nav('snap');
-  }
-  const it = SNAP.itemId && D.items[SNAP.itemId];
-  let h = header('Details', { right: '<button class="iconbtn" data-act="snapcancel" aria-label="Cancel" style="font-size:14px;width:auto;padding:0 8px">Cancel</button>', sub: it ? 'For ' + it.name : '' });
-  h += '<main>' + (SNAP.isPdf ? '<div class="card empty">PDF: ' + esc(SNAP.file.name || 'document') + '</div>' : '<img class="preview" id="snapprev" alt="Cropped image">');
-  h += '<form class="form" data-form="snap">';
-  h += '<label class="field"><span>What is it?</span><select name="kind">' + FILE_KINDS.map((k) => opt(k, SNAP.kind)).join('') + '</select></label>';
-  h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(SNAP.date) + '"></label>' +
-    '<label class="field"><span>Total (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(SNAP.total) + '"></label></div>';
-  h += '<label class="field"><span>Store</span><input name="store" value="' + esc(SNAP.store) + '"></label>';
-  h += it ? '<button class="btn primary big" type="submit" name="dest" value="item">Save to ' + esc(it.name) + '</button>'
-    : '<div class="btns"><button class="btn" type="submit" name="dest" value="inbox">Save to inbox</button><button class="btn primary" type="submit" name="dest" value="file">File to item</button></div>';
-  h += '</form></main>';
-  return h + nav('snap');
-}
-
-function viewSuggest() {
-  const byItem = groupBy(live('warranties'), 'itemId');
-  const items = live('items').filter((i) => suggestArchive(i, byItem[i.id] || []));
-  let h = header('Archive suggestions', { back: '#/home', sub: items.length + ' item' + (items.length === 1 ? '' : 's') });
-  h += '<main>';
-  if (!items.length) h += '<div class="card empty">Nothing to archive.</div>';
-  else {
-    h += '<div class="card list">' + items.map((i) => '<a class="row" href="#/item/' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
-      esc(i.status && i.status !== 'Active' ? i.status : 'Warranties ended over 2 years ago') + '</div></div></a>').join('') + '</div>';
-    h += '<button class="btn primary big" data-act="archiveall">Archive all ' + items.length + '</button><p class="muted">Archived items stay searchable and can be restored any time.</p>';
-  }
-  return h + '</main>' + nav('home');
-}
-
-function viewSettings() {
-  const props = D.lists.properties;
-  let h = header('Settings', { sub: 'Our Gear ' + APP_VERSION });
-  h += '<main>';
-  h += '<section class="section"><h2>Dropbox</h2><div class="card pad form">';
-  if (DBX.connected()) {
-    h += '<div>Connected. <span id="syncmsg">' + esc(syncLabel()) + '</span></div>' +
-      '<div class="btns"><button class="btn primary" data-act="syncnow">Sync now</button><button class="btn quiet" data-act="dbxoff">Disconnect</button></div>';
-  } else {
-    h += '<div class="muted">Sign in to the shared Dropbox account. Both phones use the same account so they share one set of records.</div>' +
-      '<button class="btn primary" data-act="dbxon">Connect Dropbox</button>';
-  }
-  h += '<label class="check"><input type="checkbox" data-act="wifionly"' + (S.wifiOnly ? ' checked' : '') + '> Sync automatically on Wi-Fi only</label></div></section>';
-  h += '<section class="section"><h2>This phone</h2><div class="card pad form"><label class="field"><span>Who uses this phone?</span><select id="ownerSel">' +
-    ['Shaun', 'Lyndsey'].map((o) => opt(o, S.owner)).join('') + '</select></label>' +
-    '<div class="field"><span>Theme</span></div><div class="swatches">' + THEMES.map((t) =>
-      '<button class="swatch" data-act="theme" data-v="' + t.id + '" aria-pressed="' + (S.theme === t.id) + '"><i style="background:' + t.a + ';border:6px solid ' + t.b + '"></i>' + esc(t.name) + '</button>').join('') + '</div></div></section>';
-  h += '<section class="section"><div class="section-head"><h2>Properties</h2><button class="btn quiet" style="min-height:36px" data-act="propsheet" data-id="">Add</button></div><div class="card list">' +
-    props.map((p) => '<button class="row" data-act="propsheet" data-id="' + esc(p.id) + '"><div class="grow"><div class="t">' + esc(p.name) + '</div><div class="s">' + esc(p.type + (p.address ? ' · ' + p.address : '')) + '</div></div></button>').join('') + '</div></section>';
-  h += '<section class="section"><h2>Lists</h2><div class="card pad form">' +
-    [['categories', 'Categories'], ['locations', 'Locations'], ['warrantyTypes', 'Warranty types']].map((x) =>
-      '<label class="field"><span>' + x[1] + ' (one per line)</span><textarea id="list-' + x[0] + '" rows="5">' + esc(D.lists[x[0]].join('\n')) + '</textarea></label>').join('') +
-    '<button class="btn primary" data-act="savelists">Save lists</button></div></section>';
-  h += '<section class="section"><h2>Backup</h2><div class="card pad form"><div class="muted">Dropbox already holds everything. This is an extra copy of your records and previews in one file.</div>' +
-    '<div class="btns"><button class="btn" data-act="export">Save backup file</button><label class="btn quiet" for="restoreIn">Restore from file</label></div>' +
-    '<input id="restoreIn" class="sr" type="file" accept="application/json,.json"></div></section>';
-  h += '<section class="section"><h2>App</h2><div class="card pad form"><div class="muted" id="storageInfo">Version ' + APP_VERSION + '</div>' +
-    '<button class="btn quiet" data-act="update">Check for update</button></div></section>';
-  return h + '</main>' + nav('settings');
-}
-
-/* ---------- sheets ---------- */
-function openSheet(html) { const s = $('#sheet'); s.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>'; s.hidden = false; hydrateThumbs(); }
-function closeSheet() { const s = $('#sheet'); s.hidden = true; s.innerHTML = ''; }
-function sheetHead(t) { return '<div class="sheet-head"><h2>' + esc(t) + '</h2><button class="iconbtn" data-act="closesheet" aria-label="Close">✕</button></div>'; }
-function fileSheet(id) {
-  const f = D.files[id]; if (!f) return;
-  const it = f.itemId && D.items[f.itemId] && !D.items[f.itemId].deleted ? D.items[f.itemId] : null;
-  let h = sheetHead(f.kind || 'File');
-  h += f.mime === 'application/pdf' ? '<div class="card empty">PDF document</div>' : '<img class="preview" data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
-  h += '<button class="btn" data-act="openfile" data-id="' + id + '">Open full file</button>';
-  h += '<form class="form" data-form="file" data-id="' + id + '">' +
-    '<label class="field"><span>What is it?</span><select name="kind">' + FILE_KINDS.map((k) => opt(k, f.kind)).join('') + '</select></label>' +
-    '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(f.date || '') + '"></label>' +
-    '<label class="field"><span>Total (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(f.total || '') + '"></label></div>' +
-    '<label class="field"><span>Store</span><input name="store" value="' + esc(f.store || '') + '"></label>' +
-    '<button class="btn primary" type="submit">Save changes</button></form>';
-  h += '<div class="muted">' + (it ? 'Filed to ' + esc(it.name) : 'In the inbox') + (f.uploaded ? ' · in Dropbox' : ' · waiting to upload') + '</div>';
-  h += '<div class="btns"><button class="btn" data-act="picker" data-id="' + id + '">' + (it ? 'Move to another item' : 'File to item') + '</button>' +
-    (it ? '<button class="btn quiet" data-act="unfile" data-id="' + id + '">Back to inbox</button>' : '<button class="btn quiet" data-act="newfromfile" data-id="' + id + '">New item from this</button>') + '</div>';
-  h += '<button class="btn danger" data-act="delfile" data-id="' + id + '">Delete file</button>';
-  openSheet(h);
-}
-function pickerList(fileId, q) {
-  const s = (q || '').toLowerCase();
-  const rows = live('items').filter((i) => !i.archived && (!s || [i.name, i.brand, i.model, i.store].some((v) => v && v.toLowerCase().includes(s))))
-    .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 60);
-  return rows.length ? rows.map((i) => '<button class="row" data-act="pick" data-file="' + fileId + '" data-id="' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
-    esc(propName(i.propertyId) + (i.location ? ', ' + i.location : '')) + '</div></div></button>').join('') : '<div class="empty">No matching items.</div>';
-}
-function openPicker(fileId) {
-  openSheet(sheetHead('File to item') + '<label class="search">' + I.search + '<span class="sr">Search items</span><input id="pickq" type="search" placeholder="Search items" data-file="' + fileId + '"></label>' +
-    '<button class="btn primary" data-act="newfromfile" data-id="' + fileId + '">' + I.plus + 'New item from this file</button>' +
-    '<div class="card list" id="picklist">' + pickerList(fileId, '') + '</div>');
-}
-function propSheet(id) {
-  const p = id ? propById(id) : { name: '', type: 'Investment', address: '' };
-  if (!p) return;
-  const used = id ? live('items').filter((i) => i.propertyId === id).length : 0;
-  openSheet(sheetHead(id ? 'Edit property' : 'Add property') + '<form class="form" data-form="prop" data-id="' + esc(id || '') + '">' +
-    '<label class="field req"><span>Name</span><input name="name" required value="' + esc(p.name) + '" placeholder="Darwin unit"></label>' +
-    '<label class="field"><span>Type</span><select name="type">' + PROPERTY_TYPES.map((t) => opt(t, p.type)).join('') + '</select></label>' +
-    '<label class="field"><span>Address</span><input name="address" value="' + esc(p.address || '') + '"></label>' +
-    '<button class="btn primary" type="submit">Save</button>' +
-    (id ? (used ? '<div class="muted">' + used + ' item' + (used > 1 ? 's use' : ' uses') + ' this property, so it can\'t be deleted.</div>' : '<button class="btn danger" type="button" data-act="delprop" data-id="' + esc(id) + '">Delete property</button>') : '') +
-    '</form>');
-}
-function addFileSheet(itemId) {
-  SNAP_TARGET = itemId; go('#/snap');
-}
-/* ---------- routing ---------- */
+/* ================= shell ================= */
 function render() {
-  const app = $('#app'); if (!app || !D) return;
-  const h = location.hash || '#/home';
-  const parts = h.replace(/^#\//, '').split('/');
-  let html;
-  switch (parts[0]) {
-    case 'items': html = viewItems(); break;
-    case 'item': html = parts[2] === 'edit' ? viewItemEdit(parts[1]) : viewItem(parts[1]); break;
-    case 'new': html = viewItemEdit(null); break;
-    case 'warranty': html = viewWarranty(parts[1], parts[2]); break;
-    case 'inbox': html = viewInbox(); break;
-    case 'snap': html = viewSnap(); break;
-    case 'settings': html = viewSettings(); break;
-    case 'suggest': html = viewSuggest(); break;
-    default: html = viewHome();
-  }
-  app.innerHTML = html;
-  if (parts[0] === 'snap' && SNAP && SNAP.step === 'crop') { drawCropView(); bindCropDrag(); }
-  if (parts[0] === 'snap' && SNAP && SNAP.step === 'details' && SNAP.result) { const im = $('#snapprev'); if (im) im.src = URL.createObjectURL(SNAP.result.full); }
-  if (parts[0] === 'warranty') warrantyPreview();
-  if (parts[0] === 'settings') storageInfo();
-  hydrateThumbs();
+  const sy = S._keepScroll ? scrollY : 0; S._keepScroll = false;
+  renderTop(); renderTabs();
+  const v = $("#view");
+  if (S.open && getP(S.open)) v.innerHTML = viewProperty(getP(S.open));
+  else { S.open = null; v.innerHTML = S.tab === "quick" ? viewQuick() : S.tab === "compare" ? viewCompare() : S.tab === "settings" ? viewSettings() : viewHome(); }
+  scrollTo(0, sy); paintStatus(); paintPhotos();
+  if (S.open && S.ptab === "whatif") paintWhatIf();
+  if (!S.open && S.tab === "quick") paintQuick();
 }
-let lastRoute = '';
-window.addEventListener('hashchange', () => {
-  const r = location.hash.split('/')[1] || '';
-  if (r !== 'item' && r !== 'warranty') ITEM_TAB = 'details';
-  if (r !== 'snap') { SNAP = null; }
-  if (r !== 'snap' && r !== 'item') SNAP_TARGET = null;
-  if (r !== 'new') { /* keep prefill only for the new-item screen */ if (lastRoute === 'new') NEW_ITEM_PREFILL = null; }
-  lastRoute = r;
-  closeSheet(); render(); window.scrollTo(0, 0);
-});
+function renderTop() {
+  const p = S.open && getP(S.open), sub = !p && S.tab === "settings" && S.set;
+  $("#topbar").innerHTML = (p ? `<button type="button" class="back" data-act="close">${IC.back}<span>Properties</span></button>`
+    : sub ? `<button type="button" class="back" data-act="setBack">${IC.back}<span>Settings</span></button>`
+    : `<button type="button" class="brand" data-act="goHome">${LOGO}<b>My Real Estate</b></button>`) + `<button type="button" class="sync" id="sync" data-act="goBackup"></button>`;
+}
+function renderTabs() {
+  const t = [["home", "Properties", IC.home], ["quick", "Quick check", IC.bolt], ["compare", "Compare", IC.cmp], ["settings", "Settings", IC.cog]];
+  $("#tabs").innerHTML = t.map(([k, l, i]) => `<button type="button" data-act="tab" data-tab="${k}" ${!S.open && S.tab === k ? 'aria-current="page"' : ""}>${i}<span>${l}</span></button>`).join("");
+}
 
-/* ---------- actions ---------- */
-const ACT = {
-  syncnow() { sync(true); },
-  tab(el) { ITEM_TAB = el.dataset.v; render(); },
-  fprop(el) { ITEMS_F.prop = el.dataset.v; render(); },
-  farch() { ITEMS_F.arch = !ITEMS_F.arch; render(); },
-  async archive(el) {
-    const it = D.items[el.dataset.id];
-    it.archived = true; it.archivedAt = Date.now(); touch(it);
-    for (const f of itemFiles(it.id)) await dropThumb(f.id);
-    await saveData(); toast('Archived. Restore it any time.'); render();
-  },
-  async restore(el) {
-    const it = D.items[el.dataset.id];
-    it.archived = false; it.archivedAt = null; touch(it);
-    await saveData(); toast('Restored'); render();
-  },
-  async archiveall() {
-    const byItem = groupBy(live('warranties'), 'itemId');
-    const items = live('items').filter((i) => suggestArchive(i, byItem[i.id] || []));
-    for (const it of items) { it.archived = true; it.archivedAt = Date.now(); touch(it); for (const f of itemFiles(it.id)) await dropThumb(f.id); }
-    await saveData(); toast(items.length + ' archived'); go('#/home');
-  },
-  async delitem(el) {
-    const it = D.items[el.dataset.id];
-    const nf = itemFiles(it.id).length;
-    if (!confirm('Delete "' + it.name + '"' + (nf ? ' and its ' + nf + ' file' + (nf > 1 ? 's' : '') : '') + '? This can\'t be undone.')) return;
-    it.deleted = true; touch(it);
-    itemWarranties(it.id).forEach((w) => { w.deleted = true; touch(w); });
-    for (const f of itemFiles(it.id)) { f.deleted = true; touch(f); await dropThumb(f.id); }
-    await saveData(); toast('Deleted'); go('#/items');
-  },
-  async delwarranty(el) {
-    if (!confirm('Delete this warranty?')) return;
-    const w = D.warranties[el.dataset.id]; w.deleted = true; touch(w);
-    await saveData(); ITEM_TAB = 'warranties'; go('#/item/' + w.itemId);
-  },
-  addfile(el) { addFileSheet(el.dataset.id); },
-  filesheet(el) { fileSheet(el.dataset.id); },
-  closesheet() { closeSheet(); },
-  openfile(el) { openFile(D.files[el.dataset.id]); },
-  picker(el) { openPicker(el.dataset.id); },
-  async pick(el) {
-    const f = D.files[el.dataset.file]; f.itemId = el.dataset.id; touch(f);
-    await saveData(); closeSheet(); ITEM_TAB = 'files'; go('#/item/' + f.itemId); toast('Filed');
-  },
-  async unfile(el) { const f = D.files[el.dataset.id]; f.itemId = null; touch(f); await saveData(); closeSheet(); render(); toast('Moved to inbox'); },
-  newfromfile(el) {
-    const f = D.files[el.dataset.id];
-    NEW_ITEM_PREFILL = { store: f.store || '', purchaseDate: f.date || '', price: f.total || '', _fileId: f.id };
-    closeSheet(); go('#/new');
-  },
-  async delfile(el) {
-    if (!confirm('Delete this file? It is removed from Dropbox too.')) return;
-    const f = D.files[el.dataset.id]; f.deleted = true; touch(f); await dropThumb(f.id);
-    await saveData(); closeSheet(); render(); toast('File deleted');
-  },
-  snapcancel() { SNAP = null; go(SNAP_TARGET ? '#/item/' + SNAP_TARGET : '#/home'); },
-  rot() { SNAP.quarter = (SNAP.quarter + 1) % 4; rebuildWork(); drawCropView(); },
-  cropall() { SNAP.crop = { x: 0, y: 0, w: SNAP.work.width, h: SNAP.work.height }; placeCropRect(); },
-  docmode(el) { SNAP.docMode = !SNAP.docMode; el.setAttribute('aria-pressed', SNAP.docMode); },
-  async cropnext(el) {
-    el.disabled = true; el.textContent = 'Working…';
-    SNAP.result = await finishImage(SNAP.work, SNAP.crop, SNAP.docMode);
-    SNAP.step = 'details'; render();
-  },
-  dbxon() { DBX.connect(); },
-  dbxoff() { if (confirm('Disconnect Dropbox on this phone? Your records stay on the phone and in Dropbox.')) { DBX.disconnect(); render(); } },
-  wifionly(el) { S.wifiOnly = el.checked; saveSettings(); },
-  theme(el) { S.theme = el.dataset.v; saveSettings(); applyTheme(); render(); },
-  propsheet(el) { propSheet(el.dataset.id); },
-  async delprop(el) {
-    if (!confirm('Delete this property?')) return;
-    D.lists.properties = D.lists.properties.filter((p) => p.id !== el.dataset.id); D.lists.updatedAt = Date.now();
-    await saveData(); closeSheet(); render();
-  },
-  async savelists() {
-    const read = (k) => Array.from(new Set($('#list-' + k).value.split('\n').map((s) => s.trim()).filter(Boolean)));
-    const c = read('categories'), l = read('locations'), w = read('warrantyTypes');
-    if (!c.length || !w.length) { toast('Categories and warranty types need at least one entry'); return; }
-    D.lists.categories = c; D.lists.locations = l; D.lists.warrantyTypes = w; D.lists.updatedAt = Date.now();
-    await saveData(); toast('Lists saved');
-  },
-  async export() {
-    const thumbs = {};
-    for (const k of await idb.keys('thumbs')) {
-      const b = await idb.get('thumbs', k);
-      thumbs[k] = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(b); });
-    }
-    const blob = new Blob([JSON.stringify({ app: 'Our Gear', version: APP_VERSION, exportedAt: new Date().toISOString(), data: D, thumbs })], { type: 'application/json' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'ourgear-backup-' + todayISO() + '.json';
-    document.body.appendChild(a); a.click(); a.remove();
-    toast('Backup saved to Downloads');
-  },
-  async update() {
-    const reg = navigator.serviceWorker && await navigator.serviceWorker.getRegistration();
-    if (reg) { await reg.update(); toast('Checked. A new version loads next time you open the app.'); } else toast('Updates aren\'t available in this browser');
-  }
-};
-document.addEventListener('click', (e) => {
-  const el = e.target.closest('[data-act]');
-  if (!el || el.tagName === 'INPUT') return;
-  if (el.dataset.act in ACT) { e.preventDefault(); ACT[el.dataset.act](el, e); }
-});
-document.addEventListener('change', async (e) => {
-  const t = e.target;
-  if (t.dataset && t.dataset.act === 'wifionly') { ACT.wifionly(t); return; }
-  if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) startSnap(f, SNAP_TARGET); return; }
-  if (t.id === 'fcat') { ITEMS_F.cat = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
-  if (t.id === 'ownerSel') { S.owner = t.value; saveSettings(); toast('Saved'); return; }
-  if (t.id === 'deg') { SNAP.deg = +t.value; rebuildWork(); drawCropView(); return; }
-  if (t.id === 'restoreIn') { restoreBackup(t.files && t.files[0]); return; }
-  if (t.closest && t.closest('[data-form="warranty"]')) warrantyPreview();
-});
-document.addEventListener('input', (e) => {
-  const t = e.target;
-  if (t.id === 'q') { ITEMS_F.q = t.value; $('#itemlist').innerHTML = itemsListHTML(); }
-  if (t.id === 'pickq') { $('#picklist').innerHTML = pickerList(t.dataset.file, t.value); }
-  if (t.id === 'deg') { $('#degv').textContent = t.value + '°'; }
-  if (t.closest && t.closest('[data-form="warranty"]')) warrantyPreview();
-});
-document.addEventListener('submit', async (e) => {
-  const form = e.target.closest('form[data-form]');
-  if (!form) return;
-  e.preventDefault();
-  const fd = new FormData(form), v = (k) => (fd.get(k) || '').toString().trim();
-  const kind = form.dataset.form;
-  if (kind === 'item') {
-    const id = form.dataset.id;
-    const it = id ? D.items[id] : { id: uid(), createdAt: Date.now() };
-    if (!v('name')) { toast('Give the item a name'); return; }
-    ['name', 'category', 'brand', 'model', 'serial', 'propertyId', 'location', 'spot', 'owner', 'store', 'purchaseDate', 'installDate', 'status', 'notes']
-      .forEach((k) => { it[k] = v(k); });
-    it.price = v('price') === '' ? '' : +v('price');
-    it.replacementValue = v('replacementValue') === '' ? '' : +v('replacementValue');
-    it.work = fd.get('work') === 'on';
-    D.items[it.id] = touch(it);
-    if (!id && NEW_ITEM_PREFILL && NEW_ITEM_PREFILL._fileId && D.files[NEW_ITEM_PREFILL._fileId]) {
-      const f = D.files[NEW_ITEM_PREFILL._fileId]; f.itemId = it.id; touch(f);
-    }
-    NEW_ITEM_PREFILL = null;
-    await saveData(); toast(id ? 'Saved' : 'Item added');
-    ITEM_TAB = id ? 'details' : 'warranties';
-    go('#/item/' + it.id);
-  } else if (kind === 'warranty') {
-    const id = form.dataset.id, itemId = form.dataset.item;
-    const w = id ? D.warranties[id] : { id: uid(), itemId, createdAt: Date.now() };
-    ['type', 'covers', 'termUnit', 'startFrom', 'startDate', 'expiryOverride', 'provider', 'contact', 'conditions'].forEach((k) => { w[k] = v(k); });
-    w.termValue = w.termUnit === 'lifetime' ? '' : v('termValue');
-    if (w.termUnit !== 'lifetime' && !w.termValue && !w.expiryOverride) { toast('Enter a term, choose Lifetime, or set an expiry date'); return; }
-    D.warranties[w.id] = touch(w);
-    await saveData(); toast('Warranty saved'); ITEM_TAB = 'warranties'; go('#/item/' + itemId);
-  } else if (kind === 'snap') {
-    const dest = e.submitter ? e.submitter.value : 'inbox';
-    SNAP.kind = v('kind'); SNAP.date = v('date'); SNAP.store = v('store'); SNAP.total = v('total');
-    const btns = form.querySelectorAll('button'); btns.forEach((b) => { b.disabled = true; });
-    const full = SNAP.isPdf ? SNAP.file : SNAP.result.full, thumb = SNAP.isPdf ? null : SNAP.result.thumb;
-    const f = touch({ id: uid(), itemId: SNAP.itemId || null, kind: SNAP.kind, date: SNAP.date, store: SNAP.store, total: SNAP.total === '' ? '' : +SNAP.total,
-      mime: SNAP.isPdf ? 'application/pdf' : 'image/jpeg', origName: SNAP.file.name || '', size: full.size, uploaded: false, path: null, createdAt: Date.now() });
-    await idb.put('blobs', f.id, full);
-    if (thumb) await idb.put('thumbs', f.id, thumb);
-    D.files[f.id] = f;
-    await saveData();
-    const target = f.itemId;
-    SNAP = null; SNAP_TARGET = null;
-    if (target) { ITEM_TAB = 'files'; go('#/item/' + target); toast('Saved'); }
-    else if (dest === 'file') { go('#/inbox'); setTimeout(() => openPicker(f.id), 50); }
-    else { go('#/inbox'); toast('Saved to inbox'); }
-  } else if (kind === 'file') {
-    const f = D.files[form.dataset.id];
-    f.kind = v('kind'); f.date = v('date'); f.store = v('store'); f.total = v('total') === '' ? '' : +v('total');
-    touch(f); await saveData(); closeSheet(); render(); toast('Saved');
-  } else if (kind === 'prop') {
-    const id = form.dataset.id;
-    if (!v('name')) return;
-    if (id) { const p = propById(id); p.name = v('name'); p.type = v('type'); p.address = v('address'); }
-    else D.lists.properties.push({ id: uid().slice(0, 10), name: v('name'), type: v('type'), address: v('address') });
-    D.lists.updatedAt = Date.now();
-    await saveData(); closeSheet(); render(); toast('Property saved');
-  }
-});
-function warrantyPreview() {
-  const form = document.querySelector('form[data-form="warranty"]'), out = $('#wpreview');
-  if (!form || !out) return;
-  const fd = new FormData(form), w = {}; fd.forEach((val, k) => { w[k] = String(val); });
-  const it = D.items[form.dataset.item];
-  if (w.termUnit === 'lifetime') { out.textContent = 'Lifetime: no expiry and no alerts. Keep the receipt.'; return; }
-  const exp = warrantyExpiry(w, it);
-  if (exp) { const d = daysUntil(exp); out.textContent = 'Ends ' + fmtDate(exp) + (d < 0 ? ' (ended ' + (-d) + ' days ago)' : ' (' + d + ' days from today)'); }
-  else out.textContent = w.startFrom === 'install' || w.startFrom === 'purchase' ? 'Add the item\'s ' + (w.startFrom === 'install' ? 'install or purchase' : 'purchase') + ' date to work out the expiry.' : 'Enter a start date and term.';
+/* ================= photos (one per property, kept small: longest side 1280 px, JPEG) ================= */
+async function photoURL(id) { if (!id) return null; if (S.urls[id]) return S.urls[id]; const f = await dbGet("files", id); if (!f || !f.blob) return null; return (S.urls[id] = URL.createObjectURL(f.blob)); }
+function paintPhotos() { for (const img of $$("img[data-photo]")) photoURL(img.dataset.photo).then(u => { if (u) { img.src = u; img.closest(".ph")?.classList.add("has"); } }); }
+async function shrinkImage(file) {
+  const bmp = await createImageBitmap(file, { imageOrientation: "from-image" }).catch(() => null);
+  const src = bmp || await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = URL.createObjectURL(file); });
+  const w = src.width, h = src.height, sc = Math.min(1, 1280 / Math.max(w, h)), c = document.createElement("canvas");
+  c.width = Math.round(w * sc); c.height = Math.round(h * sc); c.getContext("2d").drawImage(src, 0, 0, c.width, c.height);
+  return await new Promise(res => c.toBlob(res, "image/jpeg", 0.82));
 }
-async function storageInfo() {
-  const el = $('#storageInfo');
-  if (!el || !navigator.storage || !navigator.storage.estimate) return;
-  const e = await navigator.storage.estimate();
-  const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : false;
-  el.textContent = 'Version ' + APP_VERSION + ' · using ' + (e.usage / 1048576).toFixed(1) + ' MB on this phone' + (persisted ? ' · protected storage' : '');
+async function setPhoto(p, file) {
+  const blob = await shrinkImage(file); if (!blob) throw new Error("couldn't read that picture");
+  const id = uid("ph"), old = p.photo;
+  await dbPut("files", { id, type: "image/jpeg", blob });
+  p.photo = id; await saveProp(p);
+  if (old) { await dbDel("files", old); if (S.urls[old]) { URL.revokeObjectURL(S.urls[old]); delete S.urls[old]; } }
 }
-async function restoreBackup(file) {
-  if (!file) return;
+async function copyPhoto(c) { if (!c.photo) return; const f = await dbGet("files", c.photo); if (!f) { c.photo = null; return; } const id = uid("ph"); await dbPut("files", { id, type: f.type, blob: f.blob }); c.photo = id; }
+async function removePhoto(p) { const old = p.photo; if (!old) return; p.photo = null; await saveProp(p); await dbDel("files", old); if (S.urls[old]) { URL.revokeObjectURL(S.urls[old]); delete S.urls[old]; } }
+const photoBox = (p, cls) => p.photo ? `<div class="ph ${cls || ""}"><img data-photo="${esc(p.photo)}" alt="Photo of ${esc(p.name)}"></div>` : "";
+
+/* ================= home ================= */
+function viewHome() {
+  const ps = S.props.slice().sort((a, b) => ({ owned: 0, looking: 1, passed: 2 }[a.status] ?? 3) - ({ owned: 0, looking: 1, passed: 2 }[b.status] ?? 3) || String(a.name).localeCompare(b.name));
+  const owned = ps.filter(p => p.status === "owned");
+  let port = "";
+  if (owned.length) {
+    let val = 0, debt = 0, wkly = 0, rent = 0;
+    for (const p of owned) { const r = result(p); val += r.y0.value * r.k; debt += r.y0.debt * r.k; wkly += r.summary.weekly1; rent += r.rows[0].rent * r.k; }
+    port = `<div class="card"><h2>Our portfolio <span class="sub">${owned.length} owned · our shares</span></h2>
+      <div class="tiles"><div class="tile"><small>Value</small><strong>${money(val)}</strong></div><div class="tile"><small>Loans</small><strong>${money(debt)}</strong></div>
+      <div class="tile"><small>Equity</small><strong>${money(val - debt)}</strong><em>LVR ${pct(val > 0 ? debt / val : 0)}</em></div>
+      <div class="tile"><small>Rent this year</small><strong>${money(rent)}</strong></div>
+      <div class="tile"><small>After-tax cash flow, year 1</small><strong class="${cls(wkly)}">${wk(wkly)}</strong></div></div></div>`;
+  }
+  const f = S.filter, shown = ps.filter(p => f === "all" || p.status === f);
+  return `${banners()}${port}
+    <div class="row"><button type="button" class="btn primary" data-act="newProp">${IC.plus}New property</button><button type="button" class="btn" data-act="tab" data-tab="quick">${IC.bolt}Quick check</button></div>
+    <div class="seg" role="tablist">${[["all", "All"], ["owned", "Owned"], ["looking", "Looking"], ["passed", "Passed"]].map(([k, l]) => `<button type="button" class="${f === k ? "on" : ""}" data-act="filter" data-f="${k}">${l}</button>`).join("")}</div>
+    ${shown.length ? shown.map(pcard).join("") : `<div class="card empty">Nothing here yet.</div>`}
+    <p class="foot">My Real Estate ${APP_VERSION} · estimates only — check with your accountant before relying on them</p>`;
+}
+function pcard(p) {
+  const r = result(p), s = r.summary, ph = (p.placeholders || []).length;
+  return `<button type="button" class="pcard ${p.photo ? "withph" : ""}" data-act="open" data-id="${p.id}">${photoBox(p, "card")}
+    <div class="hd"><div class="t"><b>${esc(p.name)}</b><span class="addr">${esc(addrOf(p) || "No address yet")}</span></div>
+      <div class="row" style="gap:4px;justify-content:flex-end">${ph ? `<span class="chip warn">${ph} to confirm</span>` : ""}<span class="chip ${p.status}">${STATUS[p.status] || "—"}</span></div></div>
+    <div class="nums"><div><small>${p.status === "owned" ? "Value" : "Price"}</small><strong>${money(p.status === "owned" ? r.setup.value : r.setup.price)}</strong></div>
+      <div><small>Rent</small><strong>${r.income ? money(N(p.rent && p.rent.pw)) + "/wk" : "None"}</strong></div>
+      <div><small>After tax, yr 1</small><strong class="${cls(s.weekly1)}">${r.income || s.weekly1 ? wk(s.weekly1) : "—"}</strong></div>
+      <div><small>${r.k < 0.999 ? "Our share" : "Equity yr 10"}</small><strong>${r.k < 0.999 ? pct(r.k, 0) : money(s.equity10)}</strong></div></div></button>`;
+}
+function annualBanner() {
+  if (!checkDue()) return "";
+  return `<div class="banner alert" role="alert"><span><b>New financial year (${esc(curFy())}) — check your figures.</b> Tax rates, stamp duty, interest rates, rents and costs may have changed${missingYear() ? `, and there are no ${esc(curFy())} tax rates yet` : ""}.</span><button type="button" class="btn sm" data-act="goCheck">Check</button></div>`;
+}
+function banners() {
+  const out = [annualBanner()], m = S.meta;
+  if (m.conflict) out.push(`<div class="banner bad"><span>Dropbox has a different copy from this phone. Choose which one to keep.</span><button type="button" class="btn sm" data-act="goBackup">Choose</button></div>`);
+  else if (!dbxOn()) out.push(`<div class="banner info"><span>Your properties are only on this phone. Connect Dropbox to keep them safe and share them with Lyndsey's phone.</span><button type="button" class="btn sm" data-act="goBackup">Set up</button></div>`);
+  if (!m.me) out.push(`<div class="banner info"><span>Whose phone is this?</span>${people().filter(p => p.household).map(p => `<button type="button" class="btn sm" data-act="setMe" data-id="${p.id}">${esc(p.name)}</button>`).join("")}</div>`);
+  return out.join("");
+}
+
+/* ================= property page ================= */
+function viewProperty(p) {
+  const tabs = [["report", "Report"], ["whatif", "What-If"], ["edit", "Edit"]];
+  const ph = p.placeholders || [];
+  return `${photoBox(p, "hero")}<div class="card" style="gap:6px"><div class="row" style="justify-content:space-between;align-items:flex-start;flex-wrap:nowrap">
+      <div style="min-width:0"><h2 style="font-size:20px">${esc(p.name)}</h2><div class="small muted">${esc(addrOf(p) || "No address yet")}</div></div>
+      <span class="chip ${p.status}">${STATUS[p.status] || "—"}</span></div>
+      <div class="small muted">${esc([p.type, p.beds ? p.beds + " bed" : "", p.baths ? p.baths + " bath" : "", p.parking].filter(Boolean).join(" · "))}${p.purchaseDate ? " · bought " + fmtDate(p.purchaseDate) : ""}</div>
+      ${ph.length && S.ptab !== "edit" ? `<div class="banner" style="margin-top:6px"><span><b>${ph.length} figure${ph.length === 1 ? "" : "s"} still to confirm</b> — ${esc(ph.slice(0, 3).join("; "))}${ph.length > 3 ? "…" : ""}</span><button type="button" class="btn sm" data-act="ptab" data-t="edit">Edit</button></div>` : ""}</div>
+    <div class="subtabs"><div class="seg">${tabs.map(([k, l]) => `<button type="button" class="${S.ptab === k ? "on" : ""}" data-act="ptab" data-t="${k}">${l}</button>`).join("")}</div></div>
+    ${S.ptab === "whatif" ? viewWhatIf(p) : S.ptab === "edit" ? viewEdit(p) : viewReport(p)}`;
+}
+
+/* ---------- report ---------- */
+function viewReport(p) {
+  const r = result(p), s = r.summary, st = r.setup, k = r.k, rows = r.rows;
+  const shareNote = k < 0.999 ? `<div class="banner info"><span>Dollar figures are <b>your ${pct(k, 1)} share</b>. LVR and yields are for the whole property.</span></div>` : "";
+  const notInc = !r.income ? `<div class="banner info"><span>Not income-producing: no rent deductions or tax refunds are worked out. The report shows value growth and your share of the equity and costs.</span></div>` : "";
+  const inherited = rows.filter(x => x.rulesInherited).map(x => x.fy);
+  const tiles = `<div class="tiles">
+    <div class="tile"><small>After-tax cash flow, year 1</small><strong class="${cls(s.weekly1)}">${wk(s.weekly1)}</strong><em>${money(rows[0].after)} a year</em></div>
+    <div class="tile"><small>Before tax, year 1</small><strong class="${cls(s.pretaxWeekly1)}">${wk(s.pretaxWeekly1)}</strong><em>tax back ${money(rows[0].refund)}</em></div>
+    <div class="tile"><small>Cash flow turns positive</small><strong>${r.income ? (s.breakEven ? "Year " + s.breakEven : "Not in 10 yrs") : "—"}</strong><em>after tax</em></div>
+    <div class="tile"><small>Equity in year 10</small><strong>${money(s.equity10)}</strong><em>now ${money(r.y0.equity * k)}</em></div>
+    <div class="tile"><small>Wealth gained over 10 years</small><strong class="${cls(s.wealth10)}">${money(s.wealth10)}</strong><em>growth + after-tax cash</em></div>
+    <div class="tile"><small>Total borrowed</small><strong>${money(st.totalDebt * k)}</strong><em>LVR ${pct(st.lvr)}</em></div></div>`;
+  return `${notInc}${shareNote}${tiles}
+    <div class="card"><h2>Value, loans and equity</h2>${chartEquity(r)}<div class="legend"><span><i style="background:var(--c3)"></i>Loans</span><span><i style="background:var(--c1)"></i>Equity</span></div></div>
+    ${r.income ? `<div class="card"><h2>Cash flow per week</h2>${chartCash(r)}<div class="legend"><span><i style="background:var(--c2)"></i>Before tax</span><span><i style="background:var(--c1)"></i>After tax</span></div></div>` : ""}
+    <div class="sechead"><h2>10-year report</h2><span class="xs muted">scroll sideways →</span></div>
+    <div class="tablewrap">${reportTable(p, r)}</div>
+    ${inherited.length ? `<p class="xs muted" style="margin:0 2px">Tax years ${esc(inherited[0])} onward use the latest rules you have (${esc(rows.find(x => x.rulesInherited).rules)}). Add new years in Settings → Tax &amp; rules when budgets change.</p>` : ""}
+    ${setupCard(p, r)}
+    <div class="row"><button type="button" class="btn" data-act="pdf">${IC.doc}PDF report</button><button type="button" class="btn" data-act="dup">${IC.copy}Duplicate as scenario</button></div>`;
+}
+function setupCard(p, r) {
+  const st = r.setup, k = r.k;
+  const line = (l, v) => `<dt>${esc(l)}</dt><dd>${v}</dd>`;
+  return `<div class="card"><h2>Purchase &amp; funding</h2><dl class="kv">
+    ${line("Purchase price", money(st.price))}${line("Today's value", money(st.value))}
+    ${line("Cash deposit", money(st.cashDep))}${line("Equity deposit", money(st.eqDep))}
+    ${st.items.filter(c => N(c.amount)).map(c => line(c.label + (c.fund === "equity" ? " (equity)" : ""), money(c.amount))).join("")}
+    ${st.loanItems.filter(c => N(c.amount)).map(c => line(c.label + (c.fund === "equity" ? " (equity)" : ""), money(c.amount))).join("")}
+    ${line("Total purchase expenses", "<b>" + money(st.totalPurchaseExpenses) + "</b>")}
+    ${line("Cash needed", money(st.cashRequired))}${line("Equity used", money(st.equityUsed))}
+    ${line("Main loan", money(st.mainLoan) + (st.mainLoan ? ` · ${pct(N(p.loan.rate), 2)} ${p.loan.type === "PI" ? "P&I" : "I/O"}` : ""))}
+    ${st.equityLoan ? line("Equity loan", money(st.equityLoan) + ` · ${pct(p.equityLoan && p.equityLoan.rate !== "" && p.equityLoan.rate != null ? N(p.equityLoan.rate) : N(p.loan.rate), 2)}`) : ""}
+    ${line("Total borrowed / LVR", money(st.totalDebt) + " · " + pct(st.lvr))}
+    ${r.owners.length ? line("Owners", r.owners.map(o => esc(pName(o.who)) + " " + pct(o.share, o.share * 100 % 1 ? 1 : 0)).join(", ")) : ""}
+    </dl>${k < 0.999 ? `<p class="xs muted" style="margin:0">Purchase figures are for the whole property.</p>` : ""}</div>`;
+}
+/* the rows of the original workbook's 10 YEAR REPORT, plus the borrowing-cost write-off it used to hide inside total deductions */
+function reportRows(r) {
+  const k = r.k, M = v => money(v * k), owners = r.rows[0].refunds;
+  const R = [
+    ["grp", "Property"],
+    ["", "Property market value", x => M(x.value), money(r.y0.value * k)],
+    ["", "Loans (main + equity)", x => M(x.debt), money(r.y0.debt * k)],
+    ["", "LVR (loan to value)", x => pct(x.lvr), pct(r.y0.lvr)],
+    ["key", "Equity in property", x => M(x.equity), money(r.y0.equity * k)],
+    ["", "Deposit + costs return %", x => pct(x.roc), ""],
+    ["", `Available equity @ ${pct(N(r.availLVR || 0.8), 0)}`, x => M(x.avail), money(r.y0.avail * k)],
+    ["grp", "Rent"],
+    ["key", "Annual rent", x => M(x.rent)],
+    ["", "Gross yield on purchase price", x => pct(x.grossYield, 2)],
+    ["", "Net yield on purchase price", x => pct(x.netYield, 2)],
+    ["", "Yield on debt", x => pct(x.debtYield, 2)],
+    ["grp", "Cash deductions"],
+    ["", "Interest (incl. equity loan)", x => M(x.interest)],
+    ["", "Principal repayments", x => M(x.principal)],
+    ["", "Property expenses", x => M(x.expenses)],
+    ["key", "Pre-tax cash flow per year", x => `<span class="${cls(x.pretax)}">${M(x.pretax)}</span>`],
+    ["", "Pre-tax cash flow per week", x => `<span class="${cls(x.pretax)}">${M(x.pretax / 52)}</span>`],
+    ["grp", "Non-cash deductions"],
+    ["", "Depreciation", x => M(x.depreciation)],
+    ["", "Borrowing costs (written off over 5 yrs)", x => M(x.borrow)],
+    ["", "Total deductions", x => M(x.deductions)],
+    ["key", "Net profit / (loss) for tax", x => `<span class="${cls(x.net)}">${M(x.net)}</span>`],
+    ...owners.map((o, i) => ["", "Tax refund — " + o.name, x => money(x.refunds[i] ? x.refunds[i].amount : 0)]),
+    ["key", "After-tax cash flow per year", x => `<span class="${cls(x.after)}">${money(x.after)}</span>`],
+    ["key", "After-tax cash flow per week", x => `<span class="${cls(x.after)}">${money(x.after / 52)}</span>`],
+    ["grp", "Total net wealth increase"],
+    ["", "After-tax cash flow", x => money(x.after)],
+    ["", "Capital growth", x => M(x.growth)],
+    ["key", "Total (cash flow + growth)", x => `<span class="${cls(x.wealth)}">${money(x.wealth)}</span>`],
+    ["grp", "Who pays the costs"],
+    ["", "Tenant", x => pct(x.tenant, 0)], ["", "Tax back", x => pct(x.taxBack, 0)], ["", "You", x => pct(x.investor, 0)]
+  ];
+  return r.income ? R : R.filter(x => !/Gross yield|Net yield|Yield on debt|Tax refund|Who pays|Tenant|Tax back|^You$|Depreciation|Borrowing|deductions|profit/i.test(x[1]));
+}
+function reportTable(p, r) {
+  r.availLVR = p.availLVR;
+  const head = `<thead><tr><th>Year</th><th>Today</th>${r.rows.map(x => `<th>Year ${x.y}</th>`).join("")}</tr></thead>`;
+  const fy = `<tr class="fy"><td>Tax year / rules</td><td></td>${r.rows.map(x => `<td>${x.fy}${x.rulesInherited ? "*" : ""}</td>`).join("")}</tr>`;
+  const body = reportRows(r).map(([c, l, f, t]) => c === "grp" ? `<tr class="grp"><td>${esc(l)}</td><td colspan="${r.rows.length + 1}"></td></tr>`
+    : `<tr class="${c}"><td>${esc(l)}</td><td class="today">${t || ""}</td>${r.rows.map(x => `<td>${f(x)}</td>`).join("")}</tr>`).join("");
+  return `<table class="rep">${head}<tbody>${fy}${body}</tbody></table>`;
+}
+
+/* ---------- charts (plain SVG) ---------- */
+function niceMax(v) { if (v <= 0) return 1; const e = Math.pow(10, Math.floor(Math.log10(v))), m = v / e; return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 ? 2.5 : m <= 5 ? 5 : 10) * e; }
+const short = v => { const a = Math.abs(v), s = v < 0 ? minus : ""; return a >= 1e6 ? s + "$" + (a / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "m" : a >= 1e3 ? s + "$" + Math.round(a / 1e3) + "k" : s + "$" + Math.round(a); };
+function chartEquity(r) {
+  const k = r.k, pts = [{ y: "Now", debt: r.y0.debt * k, eq: r.y0.equity * k }, ...r.rows.map(x => ({ y: String(x.y), debt: x.debt * k, eq: x.equity * k }))];
+  const W = 340, H = 190, L = 44, B = 22, T = 8, max = niceMax(Math.max(...pts.map(p => Math.max(0, p.debt) + Math.max(0, p.eq)))), bw = (W - L - 6) / pts.length;
+  const y = v => T + (H - T - B) * (1 - v / max);
+  let g = ""; for (let i = 0; i <= 4; i++) { const v = max * i / 4; g += `<line x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${short(v)}</text>`; }
+  const bars = pts.map((p, i) => { const x = L + 4 + i * bw, w = bw - 5, d = Math.max(0, p.debt), e = Math.max(0, p.eq);
+    return `<rect x="${x}" y="${y(d)}" width="${w}" height="${y(0) - y(d)}" fill="var(--c3)" rx="2"><title>${p.y}: loans ${money(p.debt)}</title></rect><rect x="${x}" y="${y(d + e)}" width="${w}" height="${y(d) - y(d + e)}" fill="var(--c1)" rx="2"><title>${p.y}: equity ${money(p.eq)}</title></rect><text x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${p.y}</text>`; }).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Loans and equity each year">${g}${bars}</svg>`;
+}
+function chartCash(r) {
+  const k = r.k, pts = r.rows.map(x => ({ y: x.y, a: x.pretax * k / 52, b: x.after / 52 }));
+  const W = 340, H = 180, L = 44, B = 22, T = 8, hi = Math.max(0, ...pts.map(p => Math.max(p.a, p.b))), lo = Math.min(0, ...pts.map(p => Math.min(p.a, p.b)));
+  const span = niceMax(Math.max(hi - lo, 1)), top = hi > 0 ? Math.ceil(hi / (span / 4)) * (span / 4) : 0, bot = top - span;
+  const y = v => T + (H - T - B) * (top - v) / (top - bot), bw = (W - L - 6) / pts.length;
+  let g = ""; for (let i = 0; i <= 4; i++) { const v = bot + span * i / 4; g += `<line x1="${L}" x2="${W}" y1="${y(v)}" y2="${y(v)}" stroke="${Math.abs(v) < 1e-6 ? "var(--ink-3)" : "var(--grid)"}"/><text x="${L - 6}" y="${y(v) + 4}" text-anchor="end">${short(v)}</text>`; }
+  const bars = pts.map((p, i) => { const x = L + 4 + i * bw, w = (bw - 6) / 2;
+    const bar = (v, xx, c, t) => `<rect x="${xx}" y="${Math.min(y(v), y(0))}" width="${w}" height="${Math.max(1, Math.abs(y(v) - y(0)))}" fill="${c}" rx="2"><title>Year ${p.y} ${t}: ${wk(v)}</title></rect>`;
+    return bar(p.a, x, "var(--c2)", "before tax") + bar(p.b, x + w + 1, "var(--c1)", "after tax") + `<text x="${x + w}" y="${H - 6}" text-anchor="middle">${p.y}</text>`; }).join("");
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Cash flow per week each year">${g}${bars}</svg>`;
+}
+
+/* ---------- What-If ---------- */
+function wiBase(p) { return { pw: N(p.rent && p.rent.pw), rate: N(p.loan && p.loan.rate), vacant: N(p.rent && p.rent.vacant), capital: N(p.growth && p.growth.capital), rentGrowth: N(p.growth && p.growth.rent), price: N(p.price) }; }
+function viewWhatIf(p) {
+  if (!S.wi || S.wi.pid !== p.id) S.wi = { pid: p.id, ...wiBase(p) };
+  const b = wiBase(p), w = S.wi, r = result(p);
+  if (!r.income) return `<div class="card empty">What-If works on rent and interest. This property isn't income-producing — set it as rented in Edit to use it.</div>`;
+  const sl = (key, label, min, max, step, fmt) => `<div class="slider"><div class="top2"><label for="wi-${key}">${label}</label><output id="wo-${key}">${fmt(w[key])}</output></div>
+    <input type="range" id="wi-${key}" data-wi="${key}" min="${min}" max="${max}" step="${step}" value="${w[key]}"><span class="xs muted">Saved: ${fmt(b[key])}</span></div>`;
+  const pwMax = Math.max(200, Math.round(b.pw * 1.6 / 10) * 10), fP = v => pct(v, 2), fW = v => money(v) + "/wk";
+  return `<div class="card"><h2>Change the numbers</h2>
+    ${sl("pw", "Rent per week", Math.max(0, Math.round(b.pw * 0.5 / 10) * 10), pwMax, 5, fW)}
+    ${sl("rate", "Interest rate", 0.02, 0.11, 0.0005, fP)}
+    ${sl("vacant", "Vacant weeks a year", 0, 10, 1, v => v + " wk")}
+    ${sl("capital", "Capital growth a year", 0, 0.10, 0.0025, fP)}
+    ${sl("rentGrowth", "Rent growth a year", 0, 0.10, 0.0025, fP)}
+    ${p.status !== "owned" ? sl("price", "Purchase price", Math.round(b.price * 0.8 / 5000) * 5000, Math.round(b.price * 1.2 / 5000) * 5000, 5000, v => money(v)) : ""}
+    <div class="row"><button type="button" class="btn sm" data-act="wiReset">Reset to saved</button><button type="button" class="btn sm outline" data-act="wiSave">Save as scenario</button></div></div>
+    <div id="wiOut"></div>`;
+}
+function paintWhatIf() {
+  const p = getP(S.open); if (!p || !S.wi) return; const el = $("#wiOut"); if (!el) return;
+  const c = ctx(), b = wiBase(p), w = S.wi, over = { pw: w.pw, rate: w.rate, vacant: w.vacant, capital: w.capital, rentGrowth: w.rentGrowth, price: p.status !== "owned" ? w.price : undefined };
+  const base = result(p), now = Engine.run(p, c, over), sb = base.summary, sn = now.summary;
+  const d = (a, bb, inv) => { const x = a - bb; if (Math.abs(x) < 0.5) return `<span class="delta muted">no change</span>`; return `<span class="delta ${(inv ? -x : x) > 0 ? "pos" : "neg"}">${x > 0 ? "+" : minus}${money(Math.abs(x)).replace("$", "$")}</span>`; };
+  const ber = Engine.breakEvenRent(p, c, over);
+  const tiles = `<div class="tiles">
+    <div class="tile"><small>After tax, year 1</small><strong class="${cls(sn.weekly1)}">${wk(sn.weekly1)}</strong>${d(sn.weekly1, sb.weekly1)}</div>
+    <div class="tile"><small>Before tax, year 1</small><strong class="${cls(sn.pretaxWeekly1)}">${wk(sn.pretaxWeekly1)}</strong>${d(sn.pretaxWeekly1, sb.pretaxWeekly1)}</div>
+    <div class="tile"><small>Turns positive</small><strong>${sn.breakEven ? "Year " + sn.breakEven : "Not in 10 yrs"}</strong><em>saved: ${sb.breakEven ? "year " + sb.breakEven : "not in 10 yrs"}</em></div>
+    <div class="tile"><small>Equity in year 10</small><strong>${money(sn.equity10)}</strong>${d(sn.equity10, sb.equity10)}</div>
+    <div class="tile"><small>10-year wealth gain</small><strong>${money(sn.wealth10)}</strong>${d(sn.wealth10, sb.wealth10)}</div>
+    <div class="tile"><small>Rent to break even (after tax)</small><strong>${ber == null ? "—" : wk(Math.ceil(ber))}</strong><em>at ${pct(w.rate, 2)}</em></div></div>`;
+  // rate stress test
+  const steps = [0, 0.005, 0.01, 0.02, 0.03];
+  const stress = `<div class="card"><h2>Interest rate stress test <span class="sub">year 1, at ${money(w.pw)}/wk rent</span></h2><table class="cmp"><thead><tr><th>Rate</th><th>Before tax</th><th>After tax</th><th>A year</th></tr></thead><tbody>
+    ${steps.map(s => { const rr = Engine.run(p, c, { ...over, rate: w.rate + s }), x = rr.rows[0]; return `<tr><td>${pct(w.rate + s, 2)}${s ? ` <span class="xs">(+${pct(s, s * 100 % 1 ? 1 : 0)})</span>` : ""}</td><td class="${cls(x.pretax)}">${wk(x.pretax * rr.k / 52)}</td><td class="${cls(x.after)}">${wk(x.after / 52)}</td><td class="${cls(x.after)}">${money(x.after)}</td></tr>`; }).join("")}</tbody></table></div>`;
+  // rent × rate grid
+  const rents = [-0.15, -0.1, -0.05, 0, 0.05, 0.1, 0.15].map(f => Math.max(0, Math.round(w.pw * (1 + f) / 5) * 5));
+  const rates = [-0.01, -0.005, 0, 0.005, 0.01].map(f => Math.max(0, Math.round((w.rate + f) * 10000) / 10000));
+  const vals = rents.map(pw => rates.map(rt => Engine.run(p, c, { ...over, pw, rate: rt }).rows[0].after / 52));
+  const amax = Math.max(1, ...vals.flat().map(Math.abs));
+  const col = v => { const t = Math.min(1, Math.abs(v) / amax), a = (0.12 + 0.6 * t).toFixed(2); return v >= 0 ? `background:rgba(29,122,78,${a});color:${t > 0.55 ? "#fff" : "inherit"}` : `background:rgba(180,35,24,${a});color:${t > 0.55 ? "#fff" : "inherit"}`; };
+  const grid = `<div class="card"><h2>Rent × interest rate <span class="sub">after-tax $/week, year 1</span></h2>
+    <div class="grid"><table class="hm"><thead><tr><th>Rent ↓ Rate →</th>${rates.map(rt => `<th>${pct(rt, 2)}</th>`).join("")}</tr></thead><tbody>
+    ${rents.map((pw, i) => `<tr><th>${money(pw)}</th>${rates.map((rt, j) => `<td style="${col(vals[i][j])}" class="${i === 3 && j === 2 ? "cur" : ""}">${Math.round(vals[i][j]).toLocaleString("en-AU").replace("-", minus)}</td>`).join("")}</tr>`).join("")}
+    </tbody></table></div><div class="legend"><span><i style="background:rgba(29,122,78,.6)"></i>money in your pocket</span><span><i style="background:rgba(180,35,24,.6)"></i>you top it up</span><span>outlined = your settings above</span></div></div>`;
+  el.innerHTML = tiles + stress + grid;
+}
+
+/* ---------- Edit ---------- */
+const kinds = { money: v => num(v) ?? 0, pct: v => num(v) == null ? 0 : num(v) / 100, pctBlank: v => num(v) == null ? "" : num(v) / 100, num: v => num(v) ?? 0, numBlank: v => num(v), text: v => String(v || "").trim(), date: v => v || "", bool: (v, el) => el.checked, sel: v => v };
+function getPath(o, path) { return path.split(".").reduce((a, k) => a == null ? undefined : a[k], o); }
+function setPath(o, path, v) { const ks = path.split("."); let a = o; for (let i = 0; i < ks.length - 1; i++) { if (a[ks[i]] == null) a[ks[i]] = /^\d+$/.test(ks[i + 1]) ? [] : {}; a = a[ks[i]]; } a[ks[ks.length - 1]] = v; }
+function inp(path, kind, val, o = {}) {
+  const v = val === undefined ? "" : val, mode = kind === "text" ? "text" : "decimal";
+  const unit = kind === "money" ? "$" : (kind === "pct" || kind === "pctBlank") ? "%" : o.unit || "";
+  const input = `<input ${o.id ? `id="${o.id}"` : ""} data-path="${path}" data-kind="${kind}" ${kind === "date" ? 'type="date"' : `type="text" inputmode="${mode}"`} value="${esc(v)}" ${o.ph ? `placeholder="${esc(o.ph)}"` : ""} ${o.ro ? "readonly" : ""} autocomplete="off" ${kind === "text" ? "" : 'enterkeyhint="next"'}>`;
+  return unit ? `<span class="inwrap ${kind === "money" ? "pre" : ""}">${input}<span class="u">${unit}</span></span>` : input;
+}
+function fld(label, path, kind, val, o = {}) { const id = "f-" + path.replace(/\./g, "-"); return `<div class="field ${o.calc ? "calc" : ""}"><label for="${id}">${label}</label>${inp(path, kind, val, { ...o, id })}${o.hint ? `<span class="hint">${o.hint}</span>` : ""}</div>`; }
+function sel(label, path, val, opts, o = {}) { const id = "f-" + path.replace(/\./g, "-"); return `<div class="field"><label for="${id}">${label}</label><select id="${id}" data-path="${path}" data-kind="sel">${opts.map(x => { const [v, l] = Array.isArray(x) ? x : [x, x]; return `<option value="${esc(v)}" ${String(v) === String(val ?? "") ? "selected" : ""}>${esc(l)}</option>`; }).join("")}</select>${o.hint ? `<span class="hint">${o.hint}</span>` : ""}</div>`; }
+function sec(key, title, summary, body) { return `<details class="sec" data-sec="${key}" ${S.editOpen[key] ? "open" : ""}><summary>${title}<span class="s" data-calc="sum-${key}">${summary || ""}</span></summary><div class="body">${body}</div></details>`; }
+const calc = (key, v) => `<b data-calc="${key}">${v}</b>`;
+function viewEdit(p) {
+  const r = result(p), st = r.setup, ppl = people();
+  const costLines = (arr, base) => `<div class="lines">${(arr || []).map((c, i) => `<div class="line fund">
+      <input data-path="${base}.${i}.label" data-kind="text" value="${esc(c.label)}" aria-label="Item">
+      ${c.auto ? `<input data-autoval="${base}.${i}" value="${esc(String(Math.round((base === "purchaseCosts" ? st.items : st.loanItems)[i].amount)))}" readonly aria-label="Amount (worked out)" style="background:var(--surface-2)">` : `<input data-path="${base}.${i}.amount" data-kind="money" inputmode="decimal" value="${esc(numIn(c.amount))}" aria-label="Amount">`}
+      <select data-path="${base}.${i}.fund" data-kind="sel" aria-label="Paid from"><option value="cash" ${c.fund !== "equity" ? "selected" : ""}>Cash</option><option value="equity" ${c.fund === "equity" ? "selected" : ""}>Equity</option></select>
+      <button type="button" class="iconbtn" data-act="lineDel" data-base="${base}" data-i="${i}" aria-label="Remove">${IC.x}</button></div>
+      ${c.auto === "duty" ? `<div class="xs muted">Stamp duty worked out for ${esc(p.state || "?")} (${esc((SET().duty[p.state] || {}).asAt || "no table")}) on ${money(N(p.dutyValue) || N(p.price))}. <button type="button" class="btn ghost sm" data-act="autoOff" data-base="${base}" data-i="${i}">Type my own</button></div>` : ""}
+      ${c.auto === "lmi" ? `<div class="xs muted">LMI estimated from the LVR (a rough guide — your broker's quote is better). <button type="button" class="btn ghost sm" data-act="autoOff" data-base="${base}" data-i="${i}">Type my own</button></div>` : ""}
+      ${!c.auto && /stamp|duty/i.test(c.label) ? `<div class="xs"><button type="button" class="btn ghost sm" data-act="autoOn" data-base="${base}" data-i="${i}" data-auto="duty">Work out stamp duty</button></div>` : ""}
+      ${!c.auto && /lmi|mortgage insurance/i.test(c.label) ? `<div class="xs"><button type="button" class="btn ghost sm" data-act="autoOn" data-base="${base}" data-i="${i}" data-auto="lmi">Estimate LMI</button></div>` : ""}`).join("")}</div>
+    <button type="button" class="btn sm" data-act="lineAdd" data-base="${base}">${IC.plus}Add item</button>`;
+  const L = p.loan || {}, E = p.equityLoan || {}, R = p.rent || {}, SS = R.shortStay || { mode: "none", seasons: [] };
+  const photoCtl = `<div class="field"><span class="lab">Photo</span>${p.photo ? photoBox(p, "edit") : `<div class="small muted">No photo yet.</div>`}
+    <div class="row"><label class="btn sm">${p.photo ? "Change photo" : "Add photo"}<input type="file" id="photoIn" accept="image/*" hidden></label>${p.photo ? `<button type="button" class="btn sm danger" data-act="photoDel">Remove photo</button>` : ""}</div></div>`;
+  const details = `${photoCtl}<div class="g2">${fld("Name", "name", "text", p.name)}${sel("Status", "status", p.status, Object.entries(STATUS))}</div>
+    ${fld("Street", "street", "text", p.street)}
+    <div class="g3">${fld("Suburb", "suburb", "text", p.suburb)}${sel("State", "state", p.state, STATES)}${fld("Postcode", "postcode", "text", p.postcode)}</div>
+    <div class="g2">${sel("Type", "type", p.type, TYPES)}${fld("Parking", "parking", "text", p.parking)}</div>
+    <div class="g2">${fld("Bedrooms", "beds", "numBlank", p.beds ?? "")}${fld("Bathrooms", "baths", "numBlank", p.baths ?? "")}</div>
+    <div class="g2">${fld("Land size", "landSize", "numBlank", p.landSize ?? "", { unit: "m²" })}${fld("Building size", "buildSize", "numBlank", p.buildSize ?? "", { unit: "m²" })}</div>
+    <div class="g2">${fld("Purchase / settlement date", "purchaseDate", "date", p.purchaseDate)}${fld("Projection starts", "startDate", "date", p.startDate, { hint: "Year 1 of the report starts here" })}</div>
+    <label class="check"><input type="checkbox" data-path="incomeProducing" data-kind="bool" ${p.incomeProducing !== false ? "checked" : ""}> Rented out (income-producing — rent, deductions and tax refunds count)</label>
+    <div class="field"><label for="f-notes">Notes</label><textarea id="f-notes" data-path="notes" data-kind="text">${esc(p.notes || "")}</textarea></div>`;
+  const purchase = `<div class="g2">${fld("Purchase price", "price", "money", numIn(p.price))}${fld("Today's value", "marketValue", "money", numIn(p.marketValue), { hint: "Used for equity and LVR" })}</div>
+    ${fld("Dutiable value (if different)", "dutyValue", "money", numIn(p.dutyValue || ""), { ph: "same as price", hint: "e.g. the land price on a house-and-land contract" })}
+    <div class="g2">${fld("Cash deposit", "cashDeposit", "money", numIn(p.cashDeposit))}${fld("Equity deposit", "equityDeposit", "money", numIn(p.equityDeposit), { hint: "From the Equity Funds Loan" })}</div>
+    <h3>Purchase costs</h3>${costLines(p.purchaseCosts, "purchaseCosts")}
+    <h3>Loan costs <span class="xs muted" style="font-weight:400">— written off over ${SET().borrowYears} years for tax</span></h3>${costLines(p.loanCosts, "loanCosts")}
+    <dl class="kv"><dt>Total purchase expenses</dt><dd>${calc("tpe", money(st.totalPurchaseExpenses))}</dd><dt>Cash needed</dt><dd>${calc("cash", money(st.cashRequired))}</dd><dt>Equity used</dt><dd>${calc("eq", money(st.equityUsed))}</dd></dl>`;
+  const loan = `<label class="check"><input type="checkbox" data-act="loanManual" ${L.amountMode === "manual" ? "checked" : ""}> Set the main loan amount myself</label>
+    ${L.amountMode === "manual" ? fld("Main loan amount", "loan.amount", "money", numIn(L.amount)) : `<div class="field calc"><span class="lab">Main loan amount</span><div>${calc("main", money(st.mainLoan))} <span class="xs muted">= price − cash deposit − equity deposit</span></div></div>`}
+    <div class="g2">${fld("Interest rate", "loan.rate", "pct", pctIn(L.rate))}${sel("Repayments", "loan.type", L.type || "IO", [["IO", "Interest only"], ["PI", "Principal & interest"]])}</div>
+    <div class="g2">${L.type === "PI" ? "" : fld("Interest-only years", "loan.ioYears", "num", numIn(L.ioYears || 0), { hint: "0 = interest-only the whole time" })}${fld("Loan term", "loan.termYears", "num", numIn(L.termYears || 30), { unit: "yrs" })}</div>
+    <h3>Equity loan (deposit and costs paid from equity)</h3>
+    <div class="field calc"><span class="lab">Equity loan amount</span><div>${calc("eqLoan", money(st.equityLoan))} <span class="xs muted">= equity deposit + costs marked Equity</span></div></div>
+    <div class="g2">${fld("Equity loan rate", "equityLoan.rate", "pctBlank", pctIn(E.rate), { ph: "same as main", hint: "Leave blank for the main rate" })}${sel("Repayments", "equityLoan.type", E.type || "IO", [["IO", "Interest only"], ["PI", "Principal & interest"]])}</div>
+    <dl class="kv"><dt>Total borrowed</dt><dd>${calc("debt", money(st.totalDebt))}</dd><dt>LVR</dt><dd>${calc("lvr", pct(st.lvr))}</dd></dl>
+    ${fld("Available equity is worked out at", "availLVR", "pct", pctIn(p.availLVR || 0.8), { hint: "of the property's value (80% avoids LMI)" })}`;
+  const seasons = (SS.seasons || []);
+  const rent = `<div class="g3">${fld("Rent per week", "rent.pw", "money", numIn(R.pw))}${fld("Weeks", "rent.weeks", "num", numIn(R.weeks || 52))}${fld("Vacant weeks", "rent.vacant", "num", numIn(R.vacant))}</div>
+    <div class="g2">${fld("Property management", "mgmtPct", "pct", pctIn(p.mgmtPct), { hint: "Incl. GST, % of rent collected" })}${fld("Letting fee", "lettingWeeks", "num", numIn(p.lettingWeeks), { unit: "wks", hint: "Weeks of rent incl. GST, each year" })}</div>
+    ${sel("Short-stay rental", "rent.shortStay.mode", SS.mode || "none", [["none", "Not used"], ["replace", "Instead of the standard rent"], ["add", "On top of the standard rent"]])}
+    ${SS.mode && SS.mode !== "none" ? `<div class="lines">${seasons.map((s, i) => `<div class="g3" style="grid-template-columns:1.3fr .8fr 1fr .8fr 40px;align-items:end">
+      ${fld("Season", `rent.shortStay.seasons.${i}.name`, "text", s.name)}${fld("Weeks", `rent.shortStay.seasons.${i}.weeks`, "num", numIn(s.weeks))}${fld("Per week", `rent.shortStay.seasons.${i}.pw`, "money", numIn(s.pw))}${fld("Vacant", `rent.shortStay.seasons.${i}.vacant`, "num", numIn(s.vacant))}
+      <button type="button" class="iconbtn" data-act="lineDel" data-base="rent.shortStay.seasons" data-i="${i}" aria-label="Remove season">${IC.x}</button></div>`).join("")}</div>
+      <button type="button" class="btn sm" data-act="seasonAdd">${IC.plus}Add season</button>` : ""}
+    <dl class="kv"><dt>Rent in year 1</dt><dd>${calc("rent1", money(r.rows[0].rent))}</dd></dl>`;
+  const exp = `<div class="lines">${(p.expenses || []).map((e, i) => `<div class="line"><input data-path="expenses.${i}.label" data-kind="text" value="${esc(e.label)}" aria-label="Expense">
+      <input data-path="expenses.${i}.amount" data-kind="money" inputmode="decimal" value="${esc(numIn(e.amount))}" aria-label="Amount a year">
+      <button type="button" class="iconbtn" data-act="lineDel" data-base="expenses" data-i="${i}" aria-label="Remove">${IC.x}</button></div>`).join("")}</div>
+    <button type="button" class="btn sm" data-act="lineAdd" data-base="expenses">${IC.plus}Add expense</button>
+    <dl class="kv"><dt>Management (year 1)</dt><dd>${calc("mgmt1", money(r.rows[0].mgmt))}</dd><dt>Letting fee (year 1)</dt><dd>${calc("let1", money(r.rows[0].letting))}</dd><dt>Total year 1</dt><dd>${calc("exp1", money(r.rows[0].expenses))}</dd></dl>
+    <p class="xs muted" style="margin:0">Amounts are a year. Each grows with CPI; management and letting fees follow the rent.</p>`;
+  const dep = p.depreciation || [];
+  const depr = `<div class="dep">${Array.from({ length: 10 }, (_, i) => `<label>Year ${i + 1}<input data-path="depreciation.${i}" data-kind="money" inputmode="decimal" value="${esc(dep[i] == null ? "" : numIn(dep[i]))}"></label>`).join("")}</div>
+    <div class="row"><span class="small">Fill the empty years after the last one entered, reducing by</span><span class="inwrap" style="width:90px"><input id="depPct" type="text" inputmode="decimal" value="6" style="min-height:40px;border:1px solid var(--line-2);border-radius:8px;padding:0 26px 0 8px;width:100%;background:var(--surface)"><span class="u">%</span></span><button type="button" class="btn sm" data-act="depFill">Fill</button></div>
+    <h3>Capital works (Div 43) — only if the figures above don't include it</h3>
+    <div class="g2">${fld("Construction cost", "capWorksCost", "money", numIn(p.capWorksCost || ""), { ph: "leave blank", hint: "e.g. the build price" })}${fld("Rate a year", "capWorksRate", "pctBlank", pctIn(p.capWorksRate ?? ""), { ph: "2.5" })}</div>
+    <p class="xs muted" style="margin:0">Best: copy the yearly totals from your quantity surveyor's depreciation schedule into Years 1–10 (they normally include capital works, so leave construction cost blank). Capital works applies to residential buildings started after 15 Sept 1987, at 2.5% a year for 40 years.</p>
+    <dl class="kv"><dt>Depreciation claimed, year 1</dt><dd>${calc("dep1", money(r.rows[0].depreciation))}</dd></dl>`;
+  const owners = `<div class="lines">${(p.owners || []).map((o, i) => `<div class="line"><select data-path="owners.${i}.who" data-kind="sel" aria-label="Owner">${ppl.map(x => `<option value="${x.id}" ${x.id === o.who ? "selected" : ""}>${esc(x.name)}${x.household ? "" : " (family)"}</option>`).join("")}</select>
+      <span class="inwrap"><input data-path="owners.${i}.share" data-kind="pct" inputmode="decimal" value="${esc(pctIn(o.share))}" aria-label="Share"><span class="u">%</span></span>
+      <button type="button" class="iconbtn" data-act="lineDel" data-base="owners" data-i="${i}" aria-label="Remove">${IC.x}</button></div>`).join("")}</div>
+    <div class="row"><button type="button" class="btn sm" data-act="ownerAdd">${IC.plus}Add owner</button><button type="button" class="btn sm" data-act="ownerSplit">Split evenly</button></div>
+    <dl class="kv"><dt>Total</dt><dd>${calc("owners", pct((p.owners || []).reduce((s, o) => s + N(o.share), 0), 1))}</dd><dt>Our share</dt><dd>${calc("k", pct(r.k, 1))}</dd></dl>
+    <p class="xs muted" style="margin:0">Tax refunds use each household owner's income from Settings → People (${people().filter(x => x.household).map(x => esc(x.name) + " " + money(x.income)).join(", ")}).</p>`;
+  const growth = `<div class="g3">${fld("Capital growth", "growth.capital", "pct", pctIn(p.growth && p.growth.capital))}${fld("Rent growth", "growth.rent", "pct", pctIn(p.growth && p.growth.rent))}${fld("CPI (expenses)", "growth.cpi", "pct", pctIn(p.growth && p.growth.cpi))}</div>`;
+  const ph = p.placeholders || [];
+  const todo = `${ph.length ? `<div class="list">${ph.map((t, i) => `<div class="li" style="cursor:default;padding:10px 0"><span class="t"><span style="color:var(--ink);font-size:14px">${esc(t)}</span></span><button type="button" class="btn sm" data-act="phDone" data-i="${i}">Done</button></div>`).join("")}</div>` : `<p class="small muted" style="margin:0">Nothing to confirm.</p>`}
+    <div class="row"><input id="phNew" type="text" placeholder="Add something to check" style="flex:1;min-height:42px;border:1px solid var(--line-2);border-radius:10px;padding:0 10px;background:var(--surface)"><button type="button" class="btn sm" data-act="phAdd">Add</button></div>`;
+  const loanSum = `${money(st.totalDebt)} · ${pct(N(L.rate), 2)}`;
+  return `${sec("todo", "Still to confirm", ph.length ? ph.length + " left" : "none", todo)}
+    ${sec("details", "Details", esc(p.state || ""), details)}
+    ${sec("purchase", "Purchase & funding", money(st.price), purchase)}
+    ${sec("loan", "Loans", loanSum, loan)}
+    ${sec("rent", "Rent", r.income ? money(N(R.pw)) + "/wk" : "not rented", rent)}
+    ${sec("exp", "Expenses", money(r.rows[0].expenses) + " yr 1", exp)}
+    ${sec("dep", "Depreciation", money(r.rows[0].depreciation) + " yr 1", depr)}
+    ${sec("owners", "Owners", pct(r.k, 0) + " ours", owners)}
+    ${sec("growth", "Growth & inflation", pct(N(p.growth && p.growth.capital), 1) + " growth", growth)}
+    <p class="xs muted" style="margin:2px">Changes save as you go and sync to the other phone.</p>
+    <div class="row"><button type="button" class="btn" data-act="dup">${IC.copy}Duplicate</button><button type="button" class="btn danger" data-act="delProp">${IC.trash}Delete property</button></div>`;
+}
+/* after a field changes: refresh the worked-out figures without redrawing the form (so the keyboard stays put) */
+function updateCalcs(p) {
+  const r = result(p), st = r.setup, set = (k, v) => { for (const el of $$(`[data-calc="${k}"]`)) el.textContent = v; };
+  set("tpe", money(st.totalPurchaseExpenses)); set("cash", money(st.cashRequired)); set("eq", money(st.equityUsed)); set("main", money(st.mainLoan)); set("eqLoan", money(st.equityLoan));
+  set("debt", money(st.totalDebt)); set("lvr", pct(st.lvr)); set("rent1", money(r.rows[0].rent)); set("mgmt1", money(r.rows[0].mgmt)); set("let1", money(r.rows[0].letting)); set("exp1", money(r.rows[0].expenses));
+  set("owners", pct((p.owners || []).reduce((s, o) => s + N(o.share), 0), 1)); set("k", pct(r.k, 1));
+  set("sum-purchase", money(st.price)); set("sum-loan", `${money(st.totalDebt)} · ${pct(N(p.loan && p.loan.rate), 2)}`); set("sum-rent", r.income ? money(N(p.rent && p.rent.pw)) + "/wk" : "not rented");
+  set("dep1", money(r.rows[0].depreciation));
+  set("sum-exp", money(r.rows[0].expenses) + " yr 1"); set("sum-dep", money(r.rows[0].depreciation) + " yr 1"); set("sum-owners", pct(r.k, 0) + " ours"); set("sum-growth", pct(N(p.growth && p.growth.capital), 1) + " growth"); set("sum-details", p.state || "");
+  for (const el of $$("[data-autoval]")) { const [base, i] = el.dataset.autoval.split("."); const arr = base === "purchaseCosts" ? st.items : st.loanItems; if (arr[+i]) el.value = String(Math.round(arr[+i].amount)); }
+}
+async function saveProp(p) { await dbPut("props", p); }
+
+/* ---------- Quick Check ---------- */
+function quickState() { const d = SET().defaults; return { price: 650000, state: "NSW", pw: 600, depPct: d.depositPct, depFund: d.depositFund, rate: d.rate, type: d.type, strata: 0, rates: 0, ...(S.meta.quick || {}) }; }
+function quickProp(q) {
+  const d = SET().defaults, dep = Math.round(N(q.price) * N(q.depPct));
+  return { id: "quick", name: "Quick check", status: "looking", state: q.state, startDate: todayISO(), incomeProducing: true, price: N(q.price), marketValue: N(q.price),
+    cashDeposit: q.depFund === "cash" ? dep : 0, equityDeposit: q.depFund === "cash" ? 0 : dep,
+    purchaseCosts: [{ label: "Stamp duty", amount: 0, fund: q.depFund, auto: "duty" }, { label: "Legals (solicitor/conveyancer)", amount: d.legals, fund: q.depFund }],
+    loanCosts: [{ label: "Loan establishment fees", amount: d.establishment, fund: q.depFund }, { label: "Property valuation", amount: d.valuation, fund: q.depFund }, { label: "LMI", amount: 0, fund: q.depFund, auto: "lmi" }],
+    loan: { amountMode: "auto", rate: N(q.rate), type: q.type, ioYears: 0, termYears: d.termYears }, equityLoan: { rate: "", type: "IO" },
+    rent: { weeks: 52, pw: N(q.pw), vacant: d.vacant, shortStay: { mode: "none", seasons: [] } }, mgmtPct: d.mgmtPct, lettingWeeks: d.lettingWeeks,
+    expenses: [{ id: "e-rates", label: "Council rates", amount: N(q.rates) || Math.round(N(q.price) * d.ratesPct) }, { id: "e-bi", label: "Building insurance", amount: N(q.strata) ? 0 : d.buildingIns },
+      { id: "e-li", label: "Landlord insurance", amount: d.landlordIns }, { id: "e-strata", label: "Strata / body corporate", amount: N(q.strata) }, { id: "e-lt", label: "Land tax", amount: 0 }],
+    growth: { capital: d.capital, rent: d.rent, cpi: d.cpi }, depreciation: [], availLVR: d.availLVR, owners: clone(d.owners), placeholders: ["Depreciation (none assumed)", "Land tax (none assumed)"] };
+}
+function viewQuick() {
+  const q = quickState(), qi = (k, label, kind, val, o = {}) => `<div class="field"><label for="q-${k}">${label}</label><span class="inwrap ${kind === "money" ? "pre" : ""}"><input id="q-${k}" data-q="${k}" data-kind="${kind}" type="text" inputmode="decimal" value="${esc(kind === "pct" ? pctIn(val) : numIn(val))}" ${o.ph ? `placeholder="${o.ph}"` : ""}><span class="u">${kind === "money" ? "$" : kind === "pct" ? "%" : ""}</span></span>${o.hint ? `<span class="hint">${o.hint}</span>` : ""}</div>`;
+  const qs = (k, label, val, opts) => `<div class="field"><label for="q-${k}">${label}</label><select id="q-${k}" data-q="${k}" data-kind="sel">${opts.map(x => { const [v, l] = Array.isArray(x) ? x : [x, x]; return `<option value="${v}" ${String(v) === String(val) ? "selected" : ""}>${l}</option>`; }).join("")}</select></div>`;
+  return `<div class="card"><h2>Quick check</h2><p class="small muted" style="margin:0">For when you're at an open home or reading a listing. Everything else uses your defaults (Settings → Defaults); save it to fill in the rest.</p>
+    <div class="g2">${qi("price", "Price", "money", q.price)}${qs("state", "State", q.state, STATES)}</div>
+    <div class="g2">${qi("pw", "Expected rent per week", "money", q.pw)}${qi("rate", "Interest rate", "pct", q.rate)}</div>
+    <div class="g2">${qi("depPct", "Deposit", "pct", q.depPct)}${qs("depFund", "Deposit & costs from", q.depFund, [["equity", "Equity loan"], ["cash", "Cash"]])}</div>
+    <div class="g2">${qs("type", "Repayments", q.type, [["IO", "Interest only"], ["PI", "Principal & interest"]])}${qi("strata", "Strata a year", "money", q.strata, { ph: "0" })}</div>
+    ${qi("rates", "Council rates a year", "money", q.rates || "", { ph: "estimate", hint: `Blank = ${pct(SET().defaults.ratesPct, 2)} of the price` })}</div>
+    <div id="qOut"></div>
+    <button type="button" class="btn big primary" data-act="quickSave">Save as a property I'm looking at</button>`;
+}
+function paintQuick() {
+  const el = $("#qOut"); if (!el) return; const q = quickState(), p = quickProp(q), c = ctx(), r = Engine.run(p, c), s = r.summary, st = r.setup;
+  const ber = Engine.breakEvenRent(p, c);
+  el.innerHTML = `<div class="tiles">
+    <div class="tile"><small>After tax, year 1</small><strong class="${cls(s.weekly1)}">${wk(s.weekly1)}</strong><em>${money(r.rows[0].after)} a year</em></div>
+    <div class="tile"><small>Before tax, year 1</small><strong class="${cls(s.pretaxWeekly1)}">${wk(s.pretaxWeekly1)}</strong><em>tax back ${money(r.rows[0].refund)}</em></div>
+    <div class="tile"><small>Gross yield</small><strong>${pct(s.grossYield1, 2)}</strong><em>net ${pct(s.netYield1, 2)}</em></div>
+    <div class="tile"><small>Stamp duty</small><strong>${money(st.duty)}</strong><em>${esc(q.state)} ${esc((SET().duty[q.state] || {}).asAt || "")}</em></div>
+    <div class="tile"><small>${q.depFund === "cash" ? "Cash needed" : "Equity needed"}</small><strong>${money(q.depFund === "cash" ? st.cashRequired : st.equityUsed)}</strong><em>deposit + costs</em></div>
+    <div class="tile"><small>Total borrowed</small><strong>${money(st.totalDebt)}</strong><em>LVR ${pct(st.lvr)}${st.loanItems.find(x => x.auto === "lmi" && x.amount) ? " · LMI " + money(st.loanItems.find(x => x.auto === "lmi").amount) : ""}</em></div>
+    <div class="tile"><small>Turns positive</small><strong>${s.breakEven ? "Year " + s.breakEven : "Not in 10 yrs"}</strong><em>after tax</em></div>
+    <div class="tile"><small>Equity in year 10</small><strong>${money(s.equity10)}</strong><em>at ${pct(SET().defaults.capital, 1)} growth</em></div>
+    <div class="tile"><small>Rent to break even</small><strong>${ber == null ? "—" : wk(Math.ceil(ber))}</strong><em>after tax, year 1</em></div></div>
+    <div class="card"><h2>Cash flow per week</h2>${chartCash(r)}<div class="legend"><span><i style="background:var(--c2)"></i>Before tax</span><span><i style="background:var(--c1)"></i>After tax</span></div></div>
+    <p class="xs muted" style="margin:0 2px">Assumes ${SET().defaults.vacant} vacant weeks, ${pct(SET().defaults.mgmtPct, 1)} management, no depreciation and no land tax. Tax refunds use ${people().filter(x => x.household).map(x => esc(x.name)).join(" and ")}'s incomes, owned ${(SET().defaults.owners || []).map(o => pct(o.share, 0)).join("/")}.</p>`;
+}
+
+/* ---------- Compare ---------- */
+function viewCompare() {
+  if (!S.cmp) S.cmp = S.props.filter(p => p.status === "owned").slice(0, 3).map(p => p.id);
+  S.cmp = S.cmp.filter(id => getP(id));
+  const picks = `<div class="picks">${S.props.map(p => `<button type="button" class="pick ${S.cmp.includes(p.id) ? "on" : ""}" data-act="cmpPick" data-id="${p.id}">${esc(p.name)}</button>`).join("")}</div>`;
+  const ps = S.cmp.map(getP).filter(Boolean);
+  if (ps.length < 2) return `<div class="card"><h2>Compare</h2><p class="small muted" style="margin:0">Pick two or three properties or scenarios.</p>${picks}</div>`;
+  const rs = ps.map(result);
+  const M = [
+    ["Price", r => r.setup.price, money, 0], ["Today's value", r => r.setup.value, money, 0], ["Our share", r => r.k, v => pct(v, 0), 0],
+    ["Rent per week", (r, p) => r.income ? N(p.rent.pw) : 0, v => money(v), 1], ["Gross yield", r => r.summary.grossYield1, v => pct(v, 2), 1], ["Net yield", r => r.summary.netYield1, v => pct(v, 2), 1],
+    ["Total borrowed", r => r.setup.totalDebt, money, -1], ["LVR", r => r.setup.lvr, v => pct(v), -1], ["Cash needed", r => r.setup.cashRequired, money, -1], ["Equity used", r => r.setup.equityUsed, money, -1],
+    ["Before tax, yr 1 (/wk)", r => r.summary.pretaxWeekly1, v => money(v), 1], ["After tax, yr 1 (/wk)", r => r.summary.weekly1, v => money(v), 1],
+    ["Turns positive", r => r.income ? (r.summary.breakEven || 99) : 99, v => v === 99 ? "—" : "Year " + v, -1], ["Equity now (ours)", r => r.y0.equity * r.k, money, 1], ["Equity yr 10 (ours)", r => r.summary.equity10, money, 1],
+    ["10-yr wealth gain", r => r.summary.wealth10, money, 1], ["10-yr after-tax cash", r => r.summary.cash10, money, 1]
+  ];
+  const rows = M.map(([l, f, fm, dir]) => { const vals = rs.map((r, i) => f(r, ps[i])); const best = dir ? (dir > 0 ? Math.max(...vals) : Math.min(...vals)) : null;
+    return `<tr><td>${l}</td>${vals.map(v => `<td class="${dir && v === best && vals.filter(x => x === best).length === 1 ? "best" : ""}">${fm(v)}</td>`).join("")}</tr>`; }).join("");
+  return `<div class="card"><h2>Compare</h2>${picks}</div>
+    <div class="card" style="padding:8px 8px 4px;overflow-x:auto"><table class="cmp"><thead><tr><th></th>${ps.map(p => `<th>${esc(p.name)}<div class="xs muted" style="font-weight:400">${STATUS[p.status] || ""}</div></th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="xs muted" style="margin:0 2px">Green = best of those picked. Dollar figures for part-owned properties are your share; price, value and borrowing are for the whole property.</p>`;
+}
+
+/* ================= settings ================= */
+function viewSettings() {
+  const s = SET();
+  if (S.set === "tax") return viewTax(s);
+  if (S.set === "duty") return viewDuty(s);
+  if (S.set === "lmi") return viewLmi(s);
+  if (S.set === "people") return viewPeople(s);
+  if (S.set === "defaults") return viewDefaults(s);
+  if (S.set === "backup") return viewBackup();
+  if (S.set === "check") return viewCheck(s);
+  const li = (k, t, sub) => `<button type="button" class="li" data-act="setGo" data-k="${k}"><span class="t"><b>${t}</b><span>${sub}</span></span>${IC.chev.replace("<svg", '<svg width="18" height="18"')}</button>`;
+  const yrs = Object.keys(s.taxYears || {}).sort();
+  return `${annualBanner()}<div class="card flat"><div class="list">
+    ${li("check", "Yearly figures check", checkDue() ? `<span style="color:var(--neg);font-weight:600">Due for ${esc(curFy())}</span>` : `Checked for ${esc(s.rulesCheckedFY || "—")} on ${fmtDate(s.rulesChecked)}`)}
+    ${li("tax", "Income tax rates", `${yrs.length} years · ${yrs[0] || "—"} to ${yrs[yrs.length - 1] || "—"}`)}
+    ${li("duty", "Stamp duty tables", "All states & territories · " + esc((s.duty.NSW || {}).asAt || ""))}
+    ${li("lmi", "LMI estimate & borrowing costs", `${s.lmi.length} LVR steps · write-off over ${s.borrowYears} years`)}
+    ${li("people", "People & incomes", people().map(p => esc(p.name)).join(", "))}
+    ${li("defaults", "Defaults for new properties", `${pct(s.defaults.rate, 2)} rate · ${pct(s.defaults.capital, 1)} growth · ${pct(s.defaults.mgmtPct, 1)} management`)}
+    ${li("backup", "Dropbox & backup file", dbxOn() ? "Connected · " + syncText().t : "Not connected")}
+  </div></div>
+  <div class="card"><h2>This phone</h2>
+    <div class="field"><span class="lab">Whose phone</span><div class="seg">${people().filter(p => p.household).map(p => `<button type="button" class="${S.meta.me === p.id ? "on" : ""}" data-act="setMe" data-id="${p.id}">${esc(p.name)}</button>`).join("")}</div></div>
+    <div class="row"><button type="button" class="btn" data-act="checkUpdate">Check for update</button><button type="button" class="btn" data-act="restoreSeeds">Restore preloaded properties</button></div>
+    <p class="xs muted" style="margin:0">Version ${APP_VERSION}. Figures last checked ${fmtDate(s.rulesChecked)} (${esc(s.rulesCheckedFY || "—")}). Estimates only — not financial or tax advice.</p></div>`;
+}
+const ruleIn = (path, kind, val, o = {}) => `<input data-rule="${path}" data-kind="${kind}" type="text" inputmode="${kind === "text" ? "text" : "decimal"}" value="${esc(kind === "pct" ? pctIn(val) : kind === "text" ? (val || "") : numIn(val))}" ${o.ph ? `placeholder="${o.ph}"` : ""} aria-label="${esc(o.label || path)}">`;
+function viewTax(s) {
+  const yrs = Object.keys(s.taxYears).sort().reverse();
+  return `<div class="card"><h2>Income tax rates</h2><p class="small muted" style="margin:0">Resident rates for each financial year. Each year of a projection uses its own year's rates; years after the last one here use the latest. When a budget changes the rates, tap <b>Add next year</b> and change what's different.</p>
+    <div class="row"><button type="button" class="btn primary" data-act="taxAdd">${IC.plus}Add ${esc(nextFy(yrs[0]))}</button><button type="button" class="btn" data-act="rulesReset">Reset to built-in</button></div></div>
+    ${yrs.map(fy => { const R = s.taxYears[fy]; return `<details class="sec" ${fy === fyOf(todayISO()) ? "open" : ""}><summary>${esc(fy)}<span class="s">${(R.brackets || []).map(b => pct(b.rate, 0)).join(" / ")}</span></summary><div class="body">
+      <table class="rt"><thead><tr><th>Taxable income from</th><th>Rate</th><th></th></tr></thead><tbody>
+      ${(R.brackets || []).map((b, i) => `<tr><td>${ruleIn(`taxYears.${fy}.brackets.${i}.from`, "money", b.from, { label: "From" })}</td><td>${ruleIn(`taxYears.${fy}.brackets.${i}.rate`, "pct", b.rate, { label: "Rate %" })}</td><td><button type="button" class="iconbtn" data-act="brDel" data-fy="${fy}" data-i="${i}" aria-label="Remove">${IC.x}</button></td></tr>`).join("")}
+      </tbody></table><button type="button" class="btn sm" data-act="brAdd" data-fy="${fy}">${IC.plus}Add bracket</button>
+      <h3>Low income tax offset</h3><table class="rt"><tbody>
+        <tr><td>Maximum</td><td>${ruleIn(`taxYears.${fy}.lito.max`, "money", R.lito && R.lito.max)}</td></tr>
+        <tr><td>Full offset up to</td><td>${ruleIn(`taxYears.${fy}.lito.t1`, "money", R.lito && R.lito.t1)}</td></tr>
+        <tr><td>Then reduces by (per $)</td><td>${ruleIn(`taxYears.${fy}.lito.r1`, "pct", R.lito && R.lito.r1)}</td></tr>
+        <tr><td>Until</td><td>${ruleIn(`taxYears.${fy}.lito.t2`, "money", R.lito && R.lito.t2)}</td></tr>
+        <tr><td>Then reduces by (per $)</td><td>${ruleIn(`taxYears.${fy}.lito.r2`, "pct", R.lito && R.lito.r2)}</td></tr></tbody></table>
+      <h3>Medicare levy</h3><table class="rt"><tbody>
+        <tr><td>Rate</td><td>${ruleIn(`taxYears.${fy}.medicare.rate`, "pct", R.medicare && R.medicare.rate)}</td></tr>
+        <tr><td>Nil up to (single)</td><td>${ruleIn(`taxYears.${fy}.medicare.low`, "money", R.medicare && R.medicare.low)}</td></tr></tbody></table>
+      <div class="field"><label>Note</label>${ruleIn(`taxYears.${fy}.note`, "text", R.note)}</div>
+      <div class="row"><span class="small muted" style="flex:1">Tax on $100,000: <b>${money(Engine.incomeTax(100000, R))}</b> · on $150,000: <b>${money(Engine.incomeTax(150000, R))}</b></span><button type="button" class="btn sm danger" data-act="taxDel" data-fy="${fy}">Delete year</button></div>
+    </div></details>`; }).join("")}`;
+}
+const nextFy = fy => { const y = +String(fy || fyOf(todayISO())).slice(0, 4) + 1; return `${y}-${p2((y + 1) % 100)}`; };
+function viewDuty(s) {
+  const st = S.dutyState, T = s.duty[st] || { bands: [] };
+  return `<div class="card"><h2>Stamp duty tables</h2><p class="small muted" style="margin:0">General (investor) transfer duty — no first-home or owner-occupier concessions, no foreign-buyer surcharge. Rates are per $100 over the "from" amount; a "whole %" band charges that % of the whole price.</p>
+    <div class="picks">${STATES.map(x => `<button type="button" class="pick ${x === st ? "on" : ""}" data-act="dutyState" data-s="${x}">${x}</button>`).join("")}</div></div>
+    <div class="card"><h2>${st} <span class="sub">${esc(T.asAt || "")}</span></h2>
+    ${T.ntFormulaTo ? `<div class="banner info"><span>Up to ${money(T.ntFormulaTo)} the NT uses a formula: 0.06571441 × V² + 15 × V, where V is the price ÷ 1,000.</span></div>` : ""}
+    <table class="rt"><thead><tr><th>From</th><th>Base $</th><th>$ per $100</th><th>Whole %</th><th></th></tr></thead><tbody>
+    ${(T.bands || []).map((b, i) => `<tr><td>${ruleIn(`duty.${st}.bands.${i}.from`, "money", b.from)}</td><td>${b.whole != null ? "" : ruleIn(`duty.${st}.bands.${i}.base`, "money", b.base)}</td><td>${b.whole != null ? "" : ruleIn(`duty.${st}.bands.${i}.rate`, "pct", b.rate)}</td><td>${b.whole != null ? ruleIn(`duty.${st}.bands.${i}.whole`, "pct", b.whole) : ""}</td><td><button type="button" class="iconbtn" data-act="bandDel" data-i="${i}" aria-label="Remove">${IC.x}</button></td></tr>`).join("")}
+    </tbody></table>
+    <div class="row"><button type="button" class="btn sm" data-act="bandAdd">${IC.plus}Add band</button><button type="button" class="btn sm" data-act="bandAdd" data-whole="1">${IC.plus}Add whole-% band</button></div>
+    <div class="g2"><div class="field"><label>Rates apply from</label>${ruleIn(`duty.${st}.asAt`, "text", T.asAt)}</div><div class="field"><label>Source</label>${ruleIn(`duty.${st}.source`, "text", T.source)}</div></div>
+    <label class="check"><input type="checkbox" data-rule="duty.${st}.ceil100" data-kind="bool" ${T.ceil100 ? "checked" : ""}> Round the amount over each threshold up to the next $100</label>
+    <div class="row"><span class="small">Test a price</span><span class="inwrap pre" style="width:150px"><input id="dutyTest" type="text" inputmode="decimal" value="${esc(S.dutyTest || "700000")}" style="min-height:42px;border:1px solid var(--line-2);border-radius:9px;padding:0 8px 0 22px;width:100%;background:var(--surface)"><span class="u">$</span></span><b id="dutyOut">${money(Engine.stampDuty(num(S.dutyTest || "700000"), T))}</b></div>
+    </div>`;
+}
+function viewLmi(s) {
+  return `<div class="card"><h2>LMI estimate</h2><p class="small muted" style="margin:0">Used when a property's LMI line is set to <b>Estimate</b>. A rough guide only — premiums depend on the lender, insurer, loan size and whether it's an investment loan. A broker's quote is always better.</p>
+    <table class="rt"><thead><tr><th>LVR above</th><th>Premium (% of loan)</th><th></th></tr></thead><tbody>
+    ${s.lmi.map((l, i) => `<tr><td>${ruleIn(`lmi.${i}.above`, "pct", l.above)}</td><td>${ruleIn(`lmi.${i}.pct`, "pct", l.pct)}</td><td><button type="button" class="iconbtn" data-act="lmiDel" data-i="${i}" aria-label="Remove">${IC.x}</button></td></tr>`).join("")}</tbody></table>
+    <button type="button" class="btn sm" data-act="lmiAdd">${IC.plus}Add step</button></div>
+    <div class="card"><h2>Borrowing costs</h2><div class="field"><label>Written off for tax over</label><span class="inwrap">${ruleIn("borrowYears", "num", s.borrowYears)}<span class="u">yrs</span></span><span class="hint">Borrowing expenses over $100 are claimed over 5 years (or the loan term if shorter).</span></div></div>`;
+}
+function viewPeople(s) {
+  return `<div class="card"><h2>People &amp; incomes</h2><p class="small muted" style="margin:0">Household people's taxable incomes (before the property) are used to work out each owner's tax refund. Family co-owners (like Shannan and Carlene on Moulden) only need a name — their tax isn't worked out.</p></div>
+    ${s.people.map((p, i) => `<div class="card"><div class="g2"><div class="field"><label>Name</label>${ruleIn(`people.${i}.name`, "text", p.name)}</div>
+      <div class="field"><label>Taxable income a year</label><span class="inwrap pre">${ruleIn(`people.${i}.income`, "money", p.income)}<span class="u">$</span></span></div></div>
+      <div class="g2"><div class="field"><label>Income growth a year</label><span class="inwrap">${ruleIn(`people.${i}.incomeGrowth`, "pct", p.incomeGrowth || 0)}<span class="u">%</span></span></div>
+      <div class="field"><span class="lab">&nbsp;</span><label class="check"><input type="checkbox" data-rule="people.${i}.household" data-kind="bool" ${p.household ? "checked" : ""}> Our household (work out tax)</label></div></div>
+      ${p.household ? `<p class="xs muted" style="margin:0">Marginal rate this year: ${pct(Engine.marginalRate(N(p.income), Engine.rulesFor(fyOf(todayISO()), s.taxYears)), 1)} (incl. Medicare)</p>` : ""}
+      ${S.props.some(x => (x.owners || []).some(o => o.who === p.id)) ? "" : `<button type="button" class="btn sm danger" data-act="personDel" data-i="${i}">Remove</button>`}</div>`).join("")}
+    <button type="button" class="btn" data-act="personAdd">${IC.plus}Add person</button>`;
+}
+function viewDefaults(s) {
+  const d = s.defaults, di = (k, label, kind, o = {}) => `<div class="field"><label>${label}</label><span class="inwrap ${kind === "money" ? "pre" : ""}">${ruleIn("defaults." + k, kind, d[k])}<span class="u">${kind === "money" ? "$" : kind === "pct" ? "%" : o.unit || ""}</span></span>${o.hint ? `<span class="hint">${o.hint}</span>` : ""}</div>`;
+  return `<div class="card"><h2>Defaults</h2><p class="small muted" style="margin:0">Starting values for Quick Check and new properties. Changing them doesn't change properties already saved.</p>
+    <div class="g2">${di("rate", "Interest rate", "pct")}${di("depositPct", "Deposit", "pct")}</div>
+    <div class="g3">${di("capital", "Capital growth", "pct")}${di("rent", "Rent growth", "pct")}${di("cpi", "CPI", "pct")}</div>
+    <div class="g2">${di("vacant", "Vacant weeks", "num", { unit: "wks" })}${di("termYears", "Loan term", "num", { unit: "yrs" })}</div>
+    <div class="g2">${di("mgmtPct", "Management (incl GST)", "pct")}${di("lettingWeeks", "Letting fee", "num", { unit: "wks" })}</div>
+    <div class="g2">${di("legals", "Legals", "money")}${di("valuation", "Valuation", "money")}</div>
+    <div class="g2">${di("establishment", "Loan establishment", "money")}${di("landlordIns", "Landlord insurance", "money")}</div>
+    <div class="g2">${di("buildingIns", "Building insurance (houses)", "money")}${di("ratesPct", "Council rates (% of price)", "pct")}</div>
+    <div class="g2">${di("availLVR", "Available equity at", "pct")}<div class="field"><label>Deposit & costs from</label><select data-rule="defaults.depositFund" data-kind="sel"><option value="equity" ${d.depositFund !== "cash" ? "selected" : ""}>Equity loan</option><option value="cash" ${d.depositFund === "cash" ? "selected" : ""}>Cash</option></select></div></div>
+    <p class="xs muted" style="margin:0">New properties are owned ${(d.owners || []).map(o => esc(pName(o.who)) + " " + pct(o.share, 0)).join(", ")}; change owners per property.</p></div>`;
+}
+
+/* ================= yearly figures check ================= */
+function viewCheck(s) {
+  const due = checkDue();
+  return `<div class="card" style="${due ? "border:2px solid var(--neg)" : ""}"><h2>Yearly figures check</h2>
+    <p class="small" style="margin:0">${due ? `<b style="color:var(--neg)">Due for ${esc(curFy())}.</b>` : `Checked for <b>${esc(s.rulesCheckedFY)}</b> on ${fmtDate(s.rulesChecked)}. The red reminder comes back on 1 July.`}
+    Every 1 July tax rates, stamp duty thresholds (NSW and the ACT change every year), the Medicare threshold and your own figures — interest rates, rents, fees, insurance, rates and land tax — can change.</p>
+    <ol class="small" style="margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px">
+      <li>Tap <b>Make check report</b> and save it as a PDF.</li>
+      <li>Upload the PDF to Claude and ask it to check every value against official sources for ${esc(curFy())}.</li>
+      <li>Type any new values in here — <b>Income tax rates</b> (use <b>Add ${esc(curFy())}</b> if the year is missing), <b>Stamp duty tables</b>, <b>People &amp; incomes</b>, and each property's Edit tab.</li>
+      <li>Tap <b>Mark ${esc(curFy())} as checked</b>.</li></ol>
+    ${missingYear() ? `<div class="banner bad"><span>There are no ${esc(curFy())} income tax rates yet — projections are using ${esc(Engine.rulesFor(curFy(), s.taxYears).from)}'s.</span></div>` : ""}
+    <div class="row"><button type="button" class="btn primary" data-act="checkPdf">${IC.doc}Make check report</button><button type="button" class="btn" data-act="checkDone">Mark ${esc(curFy())} as checked</button></div></div>`;
+}
+function openModal(html) { closeModal(); const d = document.createElement("div"); d.className = "modal"; d.id = "modal"; d.innerHTML = `<div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="mTitle">${html}</div>`; document.body.appendChild(d); }
+function closeModal() { const m = $("#modal"); if (m) m.remove(); }
+function sessionGet(k) { try { return sessionStorage.getItem(k); } catch { return null; } }
+function sessionSet(k, v) { try { sessionStorage.setItem(k, v); } catch {} }
+function annualPopup() {
+  if (!checkDue() || sessionGet("mre-pop") === curFy()) return;
+  sessionSet("mre-pop", curFy());
+  openModal(`<div class="mhead"><span class="dot">!</span><h2 id="mTitle">Time to check your figures</h2></div>
+    <p style="margin:0">It's a new financial year (<b>${esc(curFy())}</b>). Tax rates, stamp duty, the Medicare threshold and your own figures — interest rates, rents, fees and costs — may have changed.${missingYear() ? ` <b>There are no ${esc(curFy())} tax rates yet.</b>` : ""}</p>
+    <p class="small" style="margin:0">Make the check report, upload the PDF to Claude to research the current values, then type in anything that's changed.</p>
+    <div class="row"><button type="button" class="btn primary" data-act="checkPdf">Make check report</button><button type="button" class="btn" data-act="goCheck">Open the check</button><button type="button" class="btn ghost" data-act="modalClose">Later</button></div>`);
+}
+/* the PDF to upload to Claude: every rule and every property figure that can go out of date, with a blank column for the checked value */
+function buildCheckPrint() {
+  const s = SET(), fy = curFy(), today = todayISO();
+  const t = (head, rows) => `<table><thead><tr>${head.map(h => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+  const chk = ["", ""]; const H = ["Item", "Value in the app", "Checked value", "Source"];
+  const prevFy = (() => { const y = +fy.slice(0, 4) - 1; return `${y}-${p2((y + 1) % 100)}`; })();
+  const yrs = Object.keys(s.taxYears).sort().filter(k => k >= prevFy);
+  const taxRows = []; for (const k of yrs) { const R = s.taxYears[k];
+    (R.brackets || []).forEach((b, i, a) => taxRows.push([`${k} — taxable income ${money(b.from)}${a[i + 1] ? " to " + money(a[i + 1].from) : " and over"}`, pct(b.rate, 1), ...chk]));
+    taxRows.push([`${k} — low income tax offset`, `${money(R.lito.max)} up to ${money(R.lito.t1)}; then reduces ${pct(R.lito.r1, 1)} of each $ to ${money(R.lito.t2)}; then ${pct(R.lito.r2, 1)} of each $`, ...chk]);
+    taxRows.push([`${k} — Medicare levy`, `${pct(R.medicare.rate, 1)}; nil up to ${money(R.medicare.low)} (single), phased in at 10c per $`, ...chk]); }
+  if (missingYear()) taxRows.push([`${fy} — not in the app yet`, "missing", ...chk]);
+  const duty = STATES.map(st => { const T = s.duty[st] || { bands: [] };
+    const bands = (T.ntFormulaTo ? [`up to ${money(T.ntFormulaTo)}: 0.06571441 × V² + 15 × V (V = price ÷ 1,000)`] : []).concat((T.bands || []).map(b => b.whole != null ? `from ${money(b.from)}: ${pct(b.whole, 2)} of the whole value` : `from ${money(b.from)}: ${money(b.base)} + $${(b.rate * 100).toFixed(2)} per $100 over`));
+    return [`<b>${st}</b><br>rates as at ${esc(T.asAt || "?")}`, bands.join("<br>"), "", esc(T.source || "")]; });
+  const lmi = s.lmi.map(l => [`LVR above ${pct(l.above, 0)}`, pct(l.pct, 2) + " of the loan", ...chk]);
+  const d = s.defaults;
+  const defs = [["Interest rate (new properties)", pct(d.rate, 2)], ["Capital growth", pct(d.capital, 2)], ["Rent growth", pct(d.rent, 2)], ["CPI", pct(d.cpi, 2)], ["Property management incl GST", pct(d.mgmtPct, 2)], ["Letting fee", d.lettingWeeks + " weeks"], ["Legals", money(d.legals)], ["Valuation", money(d.valuation)], ["Loan establishment", money(d.establishment)], ["Landlord insurance", money(d.landlordIns)], ["Building insurance", money(d.buildingIns)], ["Council rates", pct(d.ratesPct, 2) + " of price"]].map(r => [...r, ...chk]);
+  const ppl = people().filter(x => x.household).map(x => [`${esc(x.name)}'s taxable income`, money(x.income), "", "you"]);
+  const props = S.props.filter(p => p.status !== "passed" && !p.sample).map(p => { const r = result(p), st = r.setup, L = p.loan || {}, E = p.equityLoan || {};
+    const rows = [["Today's value", money(st.value)], ...(st.mainLoan ? [["Main loan", `${money(st.mainLoan)} at ${pct(N(L.rate), 2)} ${L.type === "PI" ? "P&I" : "interest only"}${L.type !== "PI" && N(L.ioYears) ? " for " + L.ioYears + " yrs" : ""}`]] : [["Loans", "None"]]),
+      ...(st.equityLoan ? [["Equity loan", `${money(st.equityLoan)} at ${pct(E.rate !== "" && E.rate != null ? N(E.rate) : N(L.rate), 2)}`]] : []),
+      ...(r.income ? [["Rent", `${money(N(p.rent.pw))}/wk, ${N(p.rent.vacant)} vacant weeks`], ["Management / letting fee", `${pct(N(p.mgmtPct), 2)} / ${numIn(p.lettingWeeks)} weeks`]] : [["Rented", "No (not income-producing)"]]),
+      ...(p.expenses || []).map(e => [esc(e.label) + " (a year)", money(e.amount)]),
+      ["Growth: capital / rent / CPI", `${pct(N(p.growth.capital), 2)} / ${pct(N(p.growth.rent), 2)} / ${pct(N(p.growth.cpi), 2)}`],
+      ["Depreciation yrs 1–10", (p.depreciation || []).map(v => Math.round(N(v)).toLocaleString("en-AU")).join(", ") || "none"],
+      ...(p.placeholders || []).map(x => ["Still to confirm", esc(x)])];
+    return `<h2>${esc(p.name)} — ${esc(addrOf(p))} (${esc(STATUS[p.status] || "")})</h2>` + t(["Item", "Value in the app", "Checked value", "Where to check"], rows.map(r => [r[0], r[1], "", "your statements"])); }).join("");
+  $("#print").innerHTML = `<div class="chkrep"><h1>My Real Estate — yearly figures check, ${esc(fy)}</h1>
+    <div class="meta">Prepared ${fmtDate(today)} with My Real Estate ${APP_VERSION}. Last checked ${fmtDate(s.rulesChecked)} (${esc(s.rulesCheckedFY || "—")}).</div>
+    <div class="ask"><b>Instructions for Claude:</b> This is the list of values my property app uses. Please research each value in sections 1 to 4 against official Australian sources (the ATO for income tax, the low income tax offset and the Medicare levy; each state or territory revenue office for general/investor transfer duty) for the ${esc(fy)} financial year and the later years shown. For each one, tell me whether it is still correct and, if not, the new value in the same format, with the source and the date it applies from. Note any change that has been announced but not yet legislated. For sections 5 and 6, flag anything that looks out of date (for example interest rates compared with current investor rates) — those figures come from my own statements.</div>
+    <h2>1. Income tax (resident) — by financial year</h2>${t(H, taxRows)}
+    <h2>2. Stamp (transfer) duty — general / investor rates, no concessions or foreign surcharge</h2>${t(["State", "Bands in the app", "Checked value", "Source in the app"], duty)}
+    <h2>3. LMI estimate and borrowing costs</h2>${t(H, [...lmi, ["Borrowing costs written off over", s.borrowYears + " years", ...chk]])}
+    <h2>4. Defaults for new properties and Quick Check</h2>${t(H, defs)}
+    <h2>5. People</h2>${t(H, ppl)}
+    <div class="pb"></div><h2>6. Our properties</h2>${props}
+    <p class="note">Generated by My Real Estate. Type checked values back into the app, then mark ${esc(fy)} as checked in Settings → Yearly figures check.</p></div>`;
+}
+
+/* ================= PDF report (print view → Save as PDF) ================= */
+function buildPrint(p) {
+  const r = result(p), s = r.summary, st = r.setup;
+  r.availLVR = p.availLVR;
+  const rows = reportRows(r).map(([c, l, f, t]) => c === "grp" ? `<tr class="grp"><td colspan="${r.rows.length + 2}">${esc(l)}</td></tr>` : `<tr class="${c}"><td>${esc(l)}</td><td>${t || ""}</td>${r.rows.map(x => `<td>${f(x).replace(/<[^>]+>/g, "")}</td>`).join("")}</tr>`).join("");
+  const kv = (l, v) => `<tr><td>${esc(l)}</td><td>${v}</td></tr>`;
+  const L = p.loan || {};
+  const ph = p.photo && S.urls[p.photo] ? `<img class="pphoto" src="${S.urls[p.photo]}" alt="">` : "";
+  $("#print").innerHTML = `${ph}<h1>${esc(p.name)} — 10-year property report</h1>
+    <div class="meta">${esc(addrOf(p))} · ${esc(STATUS[p.status] || "")} · prepared ${fmtDate(todayISO())} with My Real Estate ${APP_VERSION}${r.k < 0.999 ? ` · dollar figures are our ${pct(r.k, 1)} share` : ""}</div>
+    <div class="tiles"><div class="tile"><small>After tax, yr 1</small><strong>${wk(s.weekly1)}</strong></div><div class="tile"><small>Before tax, yr 1</small><strong>${wk(s.pretaxWeekly1)}</strong></div>
+    <div class="tile"><small>Turns positive</small><strong>${r.income ? (s.breakEven ? "Year " + s.breakEven : "Not in 10 yrs") : "—"}</strong></div><div class="tile"><small>Equity yr 10</small><strong>${money(s.equity10)}</strong></div>
+    <div class="tile"><small>10-yr wealth gain</small><strong>${money(s.wealth10)}</strong></div><div class="tile"><small>Borrowed / LVR</small><strong>${money(st.totalDebt * r.k)} · ${pct(st.lvr)}</strong></div></div>
+    <table><thead><tr><th>Year</th><th>Today</th>${r.rows.map(x => `<th>Yr ${x.y} (${x.fy})</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table>
+    <div class="pb"></div><h2>Inputs</h2><div class="cols">
+    <table><tbody>${kv("Purchase price", money(st.price))}${kv("Today's value", money(st.value))}${kv("Cash deposit", money(st.cashDep))}${kv("Equity deposit", money(st.eqDep))}
+      ${st.items.concat(st.loanItems).filter(c => N(c.amount)).map(c => kv(c.label + (c.fund === "equity" ? " (equity)" : ""), money(c.amount))).join("")}
+      ${kv("Total purchase expenses", money(st.totalPurchaseExpenses))}${kv("Cash needed", money(st.cashRequired))}${kv("Equity used", money(st.equityUsed))}</tbody></table>
+    <table><tbody>${kv("Main loan", money(st.mainLoan))}${kv("Rate / type", pct(N(L.rate), 2) + " " + (L.type === "PI" ? "P&I" : "I/O") + (L.type !== "PI" && N(L.ioYears) ? ` for ${L.ioYears} yrs` : ""))}${kv("Loan term", N(L.termYears || 30) + " yrs")}
+      ${kv("Equity loan", money(st.equityLoan))}${kv("Total borrowed / LVR", money(st.totalDebt) + " / " + pct(st.lvr))}
+      ${kv("Rent", money(N(p.rent && p.rent.pw)) + "/wk, " + N(p.rent && p.rent.vacant) + " vacant wks")}${kv("Management / letting", pct(N(p.mgmtPct), 2) + " / " + numIn(p.lettingWeeks) + " wks")}
+      ${(p.expenses || []).filter(e => N(e.amount)).map(e => kv(e.label, money(e.amount))).join("")}</tbody></table>
+    <table><tbody>${kv("Capital growth", pct(N(p.growth && p.growth.capital), 2))}${kv("Rent growth", pct(N(p.growth && p.growth.rent), 2))}${kv("CPI", pct(N(p.growth && p.growth.cpi), 2))}
+      ${kv("Depreciation yrs 1–10", (p.depreciation || []).map(v => Math.round(N(v)).toLocaleString("en-AU")).join(", ") || "none")}
+      ${kv("Owners", r.owners.map(o => esc(pName(o.who)) + " " + pct(o.share, 1)).join(", "))}
+      ${people().filter(x => x.household && r.owners.some(o => o.who === x.id)).map(x => kv(x.name + "'s taxable income", money(x.income))).join("")}
+      ${kv("Tax rules", [...new Set(r.rows.map(x => x.rules))].join(", ") + " (resident rates, LITO, Medicare)")}</tbody></table></div>
+    ${(p.placeholders || []).length ? `<p class="note"><b>Still to confirm:</b> ${esc(p.placeholders.join("; "))}</p>` : ""}
+    ${p.notes ? `<p class="note"><b>Notes:</b> ${esc(p.notes)}</p>` : ""}
+    <p class="note">Estimates only, based on the assumptions above; not financial or tax advice. Tax refunds are the difference in each owner's income tax (including the low income tax offset and Medicare levy) with and without the property's net result. Check with a qualified accountant before making decisions.</p>`;
+}
+
+/* ================= events ================= */
+document.addEventListener("click", async e => {
+  const el = e.target.closest("[data-act]"); if (!el) return;
+  const a = el.dataset.act, p = S.open && getP(S.open);
+  switch (a) {
+    case "tab": S.tab = el.dataset.tab; S.open = null; S.set = null; render(); break;
+    case "goHome": S.tab = "home"; S.open = null; render(); break;
+    case "filter": S.filter = el.dataset.f; S._keepScroll = true; render(); break;
+    case "open": S.open = el.dataset.id; S.ptab = "report"; S.wi = null; render(); break;
+    case "close": S.open = null; S.tab = "home"; render(); break;
+    case "ptab": S.ptab = el.dataset.t; render(); break;
+    case "setGo": S.set = el.dataset.k; render(); break;
+    case "setBack": S.set = null; render(); break;
+    case "goBackup": S.open = null; S.tab = "settings"; S.set = "backup"; render(); break;
+    case "setMe": S.meta.me = el.dataset.id; await saveMeta(); S._keepScroll = true; render(); break;
+    case "newProp": { const np = newProperty(); await saveProp(np); S.props.push(np); S.open = np.id; S.ptab = "edit"; S.editOpen = { details: true, purchase: true }; render(); break; }
+    case "dup": if (p) { const c = clone(p); c.id = uid("pr"); await copyPhoto(c); c.name = p.name + " (copy)"; c.sample = false; if (c.status === "owned") c.status = "looking"; await saveProp(c); S.props.push(c); S.open = c.id; S.ptab = "report"; toast("Copy made — change it without touching the original"); render(); } break;
+    case "delProp": if (p && confirm(`Delete ${p.name}? This removes it from both phones (Dropbox keeps daily snapshots).`)) { if (p.photo) await dbDel("files", p.photo); await dbDel("props", p.id); S.props = S.props.filter(x => x.id !== p.id); S.open = null; toast("Deleted"); render(); } break;
+    case "pdf": if (p) { if (p.photo) await photoURL(p.photo); buildPrint(p); setTimeout(() => window.print(), 150); } break;
+    case "lineAdd": if (p) { const arr = getPath(p, el.dataset.base) || []; arr.push(el.dataset.base === "expenses" ? { id: uid("e"), label: "", amount: 0 } : { id: uid("c"), label: "", amount: 0, fund: "cash", auto: null }); setPath(p, el.dataset.base, arr); await saveProp(p); S._keepScroll = true; render(); } break;
+    case "lineDel": if (p) { const arr = getPath(p, el.dataset.base) || []; arr.splice(+el.dataset.i, 1); await saveProp(p); S._keepScroll = true; render(); } break;
+    case "seasonAdd": if (p) { const ss = p.rent.shortStay = p.rent.shortStay || { mode: "add", seasons: [] }; ss.seasons = ss.seasons || []; ss.seasons.push({ name: ["Peak", "Mid", "Low"][ss.seasons.length] || "Season", weeks: 13, pw: 0, vacant: 3 }); await saveProp(p); S._keepScroll = true; render(); } break;
+    case "autoOff": if (p) { const it = getPath(p, el.dataset.base)[+el.dataset.i]; const st = result(p).setup; it.amount = Math.round((el.dataset.base === "purchaseCosts" ? st.items : st.loanItems)[+el.dataset.i].amount); it.auto = null; await saveProp(p); S._keepScroll = true; render(); } break;
+    case "autoOn": if (p) { const it = getPath(p, el.dataset.base)[+el.dataset.i]; it.auto = el.dataset.auto; await saveProp(p); S._keepScroll = true; render(); } break;
+    case "loanManual": if (p) { p.loan = p.loan || {}; if (el.checked) { p.loan.amountMode = "manual"; p.loan.amount = result(p).setup.mainLoan; } else p.loan.amountMode = "auto"; await saveProp(p); S._keepScroll = true; render(); } break;
+    case "ownerAdd": if (p) { p.owners = p.owners || []; const used = new Set(p.owners.map(o => o.who)); const nx = people().find(x => !used.has(x.id)) || people()[0]; p.owners.push({ who: nx.id, share: 0 }); await saveProp(p); S._keepScroll = true; render(); } break;
+    case "ownerSplit": if (p && (p.owners || []).length) { p.owners.forEach(o => o.share = 1 / p.owners.length); await saveProp(p); S._keepScroll = true; render(); } break;
+    case "depFill": if (p) { const pc = (num($("#depPct").value) ?? 6) / 100, d = Array.from({ length: 10 }, (_, i) => N((p.depreciation || [])[i]));
+      let last = -1; for (let i = 0; i < 10; i++) if (d[i]) last = i;
+      if (last < 0) { toast("Enter at least year 1 first"); break; } if (last === 9) { toast("All 10 years already have figures"); break; }
+      for (let i = last + 1; i < 10; i++) d[i] = Math.round(d[i - 1] * (1 - pc)); p.depreciation = d; await saveProp(p); toast(`Years ${last + 2}–10 filled`); S._keepScroll = true; render(); } break;
+    case "photoDel": if (p && confirm("Remove this photo?")) { await removePhoto(p); S._keepScroll = true; render(); } break;
+    case "goCheck": closeModal(); S.open = null; S.tab = "settings"; S.set = "check"; render(); break;
+    case "checkPdf": closeModal(); buildCheckPrint(); setTimeout(() => window.print(), 50); break;
+    case "checkDone": if (confirm(`Mark the ${curFy()} figures as checked? The red reminder comes back on 1 July next year.`)) { await editSettings(x => { x.rulesCheckedFY = curFy(); x.rulesChecked = todayISO(); }); closeModal(); toast("Marked as checked for " + curFy()); render(); } break;
+    case "modalClose": closeModal(); break;
+    case "phDone": if (p) { p.placeholders.splice(+el.dataset.i, 1); await saveProp(p); S._keepScroll = true; render(); } break;
+    case "phAdd": if (p) { const t = $("#phNew").value.trim(); if (t) { p.placeholders = p.placeholders || []; p.placeholders.push(t); await saveProp(p); S._keepScroll = true; render(); } } break;
+    case "wiReset": if (p) { S.wi = { pid: p.id, ...wiBase(p) }; S._keepScroll = true; render(); } break;
+    case "wiSave": if (p) { const w = S.wi, c = Engine.applyOver(p, { pw: w.pw, rate: w.rate, vacant: w.vacant, capital: w.capital, rentGrowth: w.rentGrowth, price: p.status !== "owned" ? w.price : undefined });
+      c.id = uid("pr"); await copyPhoto(c); c.name = `${p.name} — ${money(w.pw)}/wk at ${pct(w.rate, 2)}`; c.sample = false; if (c.status === "owned") c.status = "looking"; await saveProp(c); S.props.push(c); S.open = c.id; S.ptab = "report"; S.wi = null; toast("Saved as a scenario"); render(); } break;
+    case "quickSave": { const q = quickState(), np = quickProp(q); np.id = uid("pr"); np.name = `Quick check ${money(q.price)} ${q.state}`; await saveProp(np); S.props.push(np); S.open = np.id; S.ptab = "edit"; S.editOpen = { details: true }; toast("Saved — add the address and anything you know"); render(); break; }
+    case "cmpPick": { const id = el.dataset.id; S.cmp = S.cmp.includes(id) ? S.cmp.filter(x => x !== id) : [...S.cmp, id].slice(-3); S._keepScroll = true; render(); break; }
+    /* settings */
+    case "taxAdd": { const s = SET(), ks = Object.keys(s.taxYears).sort(), last = ks[ks.length - 1], nf = nextFy(last); await editSettings(x => { x.taxYears[nf] = { ...clone(x.taxYears[last]), note: "Copied from " + last + " — change what the budget changed." }; }); toast(nf + " added"); render(); break; }
+    case "taxDel": if (Object.keys(SET().taxYears).length > 1 && confirm("Delete the " + el.dataset.fy + " rates?")) { await editSettings(x => { delete x.taxYears[el.dataset.fy]; }); S._keepScroll = true; render(); } break;
+    case "brAdd": await editSettings(x => { const b = x.taxYears[el.dataset.fy].brackets; b.push({ from: (b[b.length - 1] || { from: 0 }).from + 50000, rate: 0.45 }); }); S._keepScroll = true; render(); break;
+    case "brDel": await editSettings(x => { x.taxYears[el.dataset.fy].brackets.splice(+el.dataset.i, 1); }); S._keepScroll = true; render(); break;
+    case "rulesReset": if (confirm("Put the tax rates, stamp duty tables and LMI scale back to the ones built into this version? People and properties aren't changed.")) { await editSettings(x => { const d = SEED.SETTINGS; x.taxYears = clone(d.taxYears); x.duty = clone(d.duty); x.lmi = clone(d.lmi); x.borrowYears = d.borrowYears; x.rulesChecked = d.rulesChecked; }); toast("Rules reset"); render(); } break;
+    case "dutyState": S.dutyState = el.dataset.s; render(); break;
+    case "bandAdd": await editSettings(x => { const b = x.duty[S.dutyState].bands; const last = b[b.length - 1] || { from: 0 }; b.push(el.dataset.whole ? { from: last.from + 100000, whole: 0.05 } : { from: last.from + 100000, base: 0, rate: 0.05 }); }); S._keepScroll = true; render(); break;
+    case "bandDel": await editSettings(x => { x.duty[S.dutyState].bands.splice(+el.dataset.i, 1); }); S._keepScroll = true; render(); break;
+    case "lmiAdd": await editSettings(x => { x.lmi.push({ above: 0.95, pct: 0.05 }); }); S._keepScroll = true; render(); break;
+    case "lmiDel": await editSettings(x => { x.lmi.splice(+el.dataset.i, 1); }); S._keepScroll = true; render(); break;
+    case "personAdd": await editSettings(x => { x.people.push({ id: uid("p"), name: "New person", income: 0, incomeGrowth: 0, household: false }); }); S._keepScroll = true; render(); break;
+    case "personDel": await editSettings(x => { x.people.splice(+el.dataset.i, 1); }); S._keepScroll = true; render(); break;
+    case "restoreSeeds": { const have = new Set(S.props.map(x => x.id)); const add = SEED.PROPERTIES.filter(x => !have.has(x.id)); if (!add.length) { toast("All the preloaded properties are already here"); break; } for (const x of add) { const c = clone(x); await saveProp(c); S.props.push(c); } toast(`${add.length} added back`); render(); break; }
+    case "checkUpdate": checkUpdate(); break;
+    /* backup & sync */
+    case "backupSave": backupSave(); break;
+    case "dbxConnect": el.disabled = true; try { await dbxConnect(); } catch (err) { toast("Couldn't start Dropbox sign-in: " + (err.message || err)); } el.disabled = false; break;
+    case "dbxSyncNow": dbxSync({ manual: true }); break;
+    case "dbxSnap": el.disabled = true; maybeSnapshot(true).then(() => { toast("Snapshot saved to Dropbox"); render(); }).catch(x => { el.disabled = false; toast("Snapshot didn't save: " + (x.message || x)); }); break;
+    case "dbxList": listSnapshots(); break;
+    case "dbxUse": useSnapshot(el.dataset.path); break;
+    case "conflictDropbox": resolveConflict(true); break;
+    case "conflictPhone": resolveConflict(false); break;
+    case "dbxDisconnect": if (confirm("Disconnect Dropbox? Everything already in Dropbox is kept, but new changes will only be on this phone.")) dbxDisconnect(); break;
+  }
+});
+document.addEventListener("toggle", e => { const d = e.target; if (d.matches && d.matches("details.sec[data-sec]")) S.editOpen[d.dataset.sec] = d.open; }, true);
+document.addEventListener("change", async e => {
+  const el = e.target;
+  if (el.dataset.path && S.open) {
+    const p = getP(S.open); if (!p) return;
+    const v = kinds[el.dataset.kind](el.value, el); setPath(p, el.dataset.path, v);
+    await saveProp(p);
+    const structural = /^(status|state|loan\.type|equityLoan\.type|rent\.shortStay\.mode|incomeProducing|name)$/.test(el.dataset.path) || el.dataset.path.endsWith(".fund") || el.dataset.path.endsWith(".who");
+    if (structural) { S._keepScroll = true; render(); } else updateCalcs(p);
+    return;
+  }
+  if (el.dataset.rule) {
+    const v = kinds[el.dataset.kind](el.value, el);
+    await editSettings(s => setPath(s, el.dataset.rule, v));
+    resCache.clear();
+    if (el.dataset.kind === "bool") { S._keepScroll = true; render(); } // only tick boxes change what's shown; typed values stay put so the keyboard doesn't jump
+    else { const o = $("#dutyOut"); if (o) o.textContent = money(Engine.stampDuty(num(S.dutyTest || "700000"), SET().duty[S.dutyState])); }
+    return;
+  }
+  if (el.id === "wifiOnly") { S.meta.wifiOnly = el.checked; await saveMeta(); paintStatus(); if (!el.checked) scheduleSync(500); return; }
+  if (el.id === "restoreIn" && el.files[0]) { restoreFile(el.files[0]); el.value = ""; }
+  if (el.id === "photoIn" && el.files[0] && S.open) { const p = getP(S.open); toast("Adding photo…"); try { await setPhoto(p, el.files[0]); toast("Photo saved"); } catch (err) { toast("That photo couldn't be added: " + (err.message || err)); } el.value = ""; S._keepScroll = true; render(); }
+});
+document.addEventListener("input", e => {
+  const el = e.target;
+  if (el.dataset.wi && S.wi) { const k = el.dataset.wi, v = Number(el.value); S.wi[k] = v; const o = $("#wo-" + k); if (o) o.textContent = k === "pw" ? money(v) + "/wk" : k === "vacant" ? v + " wk" : k === "price" ? money(v) : pct(v, 2); clearTimeout(paintWhatIf._t); paintWhatIf._t = setTimeout(paintWhatIf, 60); return; }
+  if (el.dataset.q) { const q = quickState(); q[el.dataset.q] = el.dataset.kind === "sel" ? el.value : el.dataset.kind === "pct" ? (num(el.value) ?? 0) / 100 : (num(el.value) ?? 0); S.meta.quick = q; saveMeta(); clearTimeout(paintQuick._t); paintQuick._t = setTimeout(paintQuick, 120); return; }
+  if (el.id === "dutyTest") { S.dutyTest = el.value; const o = $("#dutyOut"); if (o) o.textContent = money(Engine.stampDuty(num(el.value), SET().duty[S.dutyState])); }
+});
+document.addEventListener("change", e => { if (e.target.dataset && e.target.dataset.q && e.target.dataset.kind === "sel") e.target.dispatchEvent(new Event("input", { bubbles: true })); });
+
+function newProperty() {
+  const d = SET().defaults;
+  return { id: uid("pr"), name: "New property", status: "looking", street: "", suburb: "", state: "NSW", postcode: "", type: "House", startDate: todayISO(), incomeProducing: true,
+    price: 0, marketValue: 0, cashDeposit: 0, equityDeposit: 0,
+    purchaseCosts: [{ id: uid("c"), label: "Legals (solicitor/conveyancer)", amount: d.legals, fund: d.depositFund }, { id: uid("c"), label: "Stamp duty", amount: 0, fund: d.depositFund, auto: "duty" }, { id: uid("c"), label: "Other costs", amount: 0, fund: d.depositFund }],
+    loanCosts: [{ id: uid("c"), label: "Loan establishment fees", amount: d.establishment, fund: d.depositFund }, { id: uid("c"), label: "Property valuation", amount: d.valuation, fund: d.depositFund }, { id: uid("c"), label: "LMI", amount: 0, fund: d.depositFund, auto: "lmi" }],
+    loan: { amountMode: "auto", rate: d.rate, type: d.type, ioYears: 0, termYears: d.termYears }, equityLoan: { rate: "", type: "IO" },
+    rent: { weeks: 52, pw: 0, vacant: d.vacant, shortStay: { mode: "none", seasons: [] } }, mgmtPct: d.mgmtPct, lettingWeeks: d.lettingWeeks,
+    expenses: [{ id: uid("e"), label: "Council rates", amount: 0 }, { id: uid("e"), label: "Building insurance", amount: d.buildingIns }, { id: uid("e"), label: "Landlord insurance", amount: d.landlordIns }, { id: uid("e"), label: "Strata / body corporate", amount: 0 }, { id: uid("e"), label: "Land tax", amount: 0 }],
+    growth: { capital: d.capital, rent: d.rent, cpi: d.cpi }, depreciation: [], availLVR: d.availLVR, owners: clone(d.owners), placeholders: [], notes: "" };
+}
+async function checkUpdate() {
+  try { const r = navigator.serviceWorker && await navigator.serviceWorker.getRegistration(); if (r) await r.update(); toast("Checking… the app will reload"); setTimeout(() => location.reload(), 1200); }
+  catch (e) { toast("Couldn't check for an update: " + (e.message || e)); }
+}
+
+/* ================= backup file ================= */
+function viewBackup() {
+  return `${dropboxPanel()}
+  <div class="card"><h2>Backup file</h2><p class="small muted" style="margin:0">One file with every property, photo and setting — an extra copy for the QNAP. Never upload it to GitHub.</p>
+    <div class="row"><button type="button" class="btn" data-act="backupSave">Save backup file</button>
+    <label class="btn">Restore from file…<input type="file" id="restoreIn" accept="application/json,.json" hidden></label></div>
+    ${S.meta.lastBackup ? `<p class="xs muted" style="margin:0">Last backup file: ${esc(fmtWhen(S.meta.lastBackup))}</p>` : ""}</div>`;
+}
+async function backupSave() {
+  const files = await dbAll("files"), photos = {};
+  for (const f of files) photos[f.id] = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f.blob); });
+  const blob = new Blob([wrap({ ...(await localData(files)), photos })], { type: "application/json" }), a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = `my-real-estate-backup-${todayISO()}.json`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  S.meta.lastBackup = new Date().toISOString(); await saveMeta(); toast("Backup file saved to Downloads");
+}
+async function restoreFile(f) {
   try {
-    const j = JSON.parse(await file.text());
-    if (!j || !j.data || !j.data.items) throw new Error('Not an Our Gear backup');
-    mergeInto(D, j.data);
-    for (const [k, url] of Object.entries(j.thumbs || {})) {
-      if (!(await idb.get('thumbs', k))) await idb.put('thumbs', k, await (await fetch(url)).blob());
-    }
-    await saveData(); toast('Backup restored'); render();
-  } catch (e) { toast('Restore failed: ' + e.message); }
-}
-function applyTheme() {
-  document.documentElement.dataset.theme = S.theme;
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.content = { midnight: '#0B1220', indigo: '#FFFFFF', slate: '#1E293B', ink: '#0F2A2E' }[S.theme] || '#FFFFFF';
-}
-/* Files shared to Our Gear from other apps land in the inbox. */
-async function importShared() {
-  const keys = await idb.keys('share');
-  if (!keys.length) return;
-  let n = 0;
-  for (const k of keys) {
-    const s = await idb.get('share', k);
-    try {
-      const isPdf = s.type === 'application/pdf' || /\.pdf$/i.test(s.name);
-      let full = s.blob, thumb = null;
-      if (!isPdf && /^image\//.test(s.type)) { const r = await quickCompress(s.blob); full = r.full; thumb = r.thumb; }
-      else if (!isPdf) continue;
-      const f = touch({ id: uid(), itemId: null, kind: isPdf ? 'Tax invoice' : 'Receipt', date: todayISO(), store: '', total: '',
-        mime: isPdf ? 'application/pdf' : 'image/jpeg', origName: s.name, size: full.size, uploaded: false, path: null, createdAt: Date.now() });
-      await idb.put('blobs', f.id, full); if (thumb) await idb.put('thumbs', f.id, thumb);
-      D.files[f.id] = f; n++;
-    } finally { await idb.del('share', k); }
-  }
-  if (n) { await saveData(); toast(n + ' file' + (n > 1 ? 's' : '') + ' added to inbox'); }
+    const d = readPayload(JSON.parse(await f.text()));
+    if (!confirm(`Restore ${d.props.length} properties from this file? It replaces everything on this phone${dbxOn() ? " and in Dropbox (the current copy is saved as a snapshot first)" : ""}.`)) return;
+    if (!(await snapshotBeforeReplace())) return;
+    await applyData(d, true);
+    S.meta.tomb = {}; S.meta.conflict = null; S.meta.gen = uid("g"); S.meta.genPending = true; await saveMeta(); markDirty();
+    toast(`Restored ${d.props.length} properties`); render();
+  } catch (e) { toast("That file couldn't be restored: " + (e.message || e)); }
 }
 
-/* ---------- start ---------- */
-async function boot() {
-  try { S = Object.assign(defaultSettings(), JSON.parse(localStorage.getItem('og_settings') || '{}')); } catch (e) { S = defaultSettings(); }
-  applyTheme();
-  await idb.open();
-  D = (await idb.get('kv', 'data')) || emptyData();
-  if (!D.lists) D.lists = JSON.parse(JSON.stringify(DEFAULT_LISTS));
-  const signedIn = await DBX.finishSignIn().catch((e) => { toast('Sign-in error: ' + e.message); return true; });
-  if (location.search.includes('share=1')) history.replaceState(null, '', location.pathname + '#/inbox');
-  await importShared().catch(() => {});
-  render();
-  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
-  window.addEventListener('online', () => scheduleSync());
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleSync(); });
-  window.addEventListener('resize', () => { if (SNAP && SNAP.step === 'crop') drawCropView(); });
-  if (DBX.connected()) sync(!!signedIn);
+/* ================= Dropbox: live copy + snapshots (same approach as Our Tax and MyGarage) =================
+   Dropbox › Apps › MyRealEstate
+     live/myrealestate.json           properties and settings — sent a few seconds after every change (Wi‑Fi only unless switched off)
+     snapshots/myrealestate-*.json    one per day, plus one before every restore (kept 60 days)
+     archive/myrealestate-YYYY-MM.json   the last copy of each month (kept 8 years)   */
+const DBX_APP_KEY = ""; // public App key for the My Real Estate Dropbox app — paste it in the app (Settings → Dropbox) or put it here
+const DBX_TOKEN = "https://api.dropboxapi.com/oauth2/token";
+const DBX_REDIRECT = location.origin + location.pathname.replace(/index\.html$/, "");
+const LIVE = "/live/myrealestate.json";
+let syncing = false, syncT = null, retryT = null;
+const appKey = () => DBX_APP_KEY || S.meta.dbxKey || "";
+const dbxOn = () => !!(S.meta.dbx && S.meta.dbx.refresh);
+const hasData = () => S.props.length > 0;
+const ownerName = () => (S.meta.me ? pName(S.meta.me) + "'s phone" : "A phone") + ", set up " + fmtDate(S.meta.created || todayISO());
+const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+class DbxErr extends Error { constructor(m, s, sum) { super(m); this.status = s; this.summary = sum || ""; } }
+const dbxArg = o => JSON.stringify(o).replace(/[\u007f-￿]/g, c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const fmtWhen = s => { if (!s) return "never"; const d = new Date(s); if (isNaN(d)) return "—"; const t = d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }); return (isoOf(d) === todayISO() ? "today" : fmtDate(isoOf(d))) + ", " + t; };
+const notFound = e => e instanceof DbxErr && e.status === 409 && /not_found/.test(e.summary);
+function snapName(kind) { const d = new Date(); return `/snapshots/myrealestate-${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}${kind ? "-" + p2(d.getHours()) + p2(d.getMinutes()) + "-" + kind : ""}.json`; }
+const wifiOnly = () => S.meta.wifiOnly !== false;
+const mobileBlocked = () => !!(wifiOnly() && navigator.connection && navigator.connection.type === "cellular");
+
+function markDirty() { if (_quiet) return; S.meta.dirty = true; S.meta.changes = (S.meta.changes || 0) + 1; S.meta.seq = (S.meta.seq || 0) + 1; saveMeta().catch(() => {}); scheduleSync(); paintStatus(); }
+function syncText() {
+  if (!dbxOn()) return hasData() ? { t: "not backed up", c: "warn" } : { t: "not connected", c: "" };
+  if (S.meta.conflict) return { t: "Dropbox copy differs · tap", c: "warn" };
+  if (syncing) return { t: "syncing…", c: "" };
+  if (S.meta.syncError) return { t: "sync failed · tap", c: "warn" };
+  if (S.meta.dirty) { const n = S.meta.changes || 1; return { t: `${n} change${n === 1 ? "" : "s"} waiting${mobileBlocked() ? " for Wi‑Fi" : ""}`, c: "" }; }
+  return { t: "in Dropbox ✓", c: "ok" };
 }
-if (typeof document !== 'undefined' && typeof module === 'undefined') boot();
-if (typeof module !== 'undefined') module.exports = { addTerm, daysUntil, warrantyStatus, itemStatus, mergeInto, desiredPath, suggestArchive, safeName, fileBaseName, emptyData };
+function paintStatus() {
+  const el = $("#sync"); if (!el) return; const s = syncText();
+  el.innerHTML = (s.c === "ok" ? IC.wifi : "") + esc((S.meta.me ? pName(S.meta.me) + " · " : "") + s.t); el.className = "sync " + s.c;
+  const pnl = $("#dbxStatus"); if (pnl) pnl.textContent = cap1(s.t.replace(" · tap", ""));
+}
+async function dbxConnect() {
+  if (!navigator.onLine) { toast("You're offline. Connect Dropbox when you have internet."); return; }
+  const key = DBX_APP_KEY || (($("#dbxKey") || {}).value || S.meta.dbxKey || "").trim();
+  if (!/^[a-z0-9]{8,}$/i.test(key)) { toast("Paste the App key from the Dropbox App Console first"); return; }
+  const v = b64url(crypto.getRandomValues(new Uint8Array(48))), state = b64url(crypto.getRandomValues(new Uint8Array(12)));
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)));
+  S.meta.dbxKey = key; S.meta.pkce = { v, state }; S.meta.syncError = null; await saveMeta();
+  location.href = "https://www.dropbox.com/oauth2/authorize?" + new URLSearchParams({ client_id: key, response_type: "code", code_challenge: challenge, code_challenge_method: "S256", redirect_uri: DBX_REDIRECT, token_access_type: "offline", state });
+}
+async function dbxReturn() {
+  const q = new URLSearchParams(location.search);
+  if (!q.has("code") && !q.has("error")) return false;
+  history.replaceState(null, "", DBX_REDIRECT);
+  if (q.has("error")) { toast("Dropbox not connected: " + (q.get("error_description") || q.get("error")).replace(/\+/g, " ")); return true; }
+  if (!S.meta.pkce || q.get("state") !== S.meta.pkce.state) { toast("That Dropbox sign-in didn't match. Tap Connect Dropbox again."); return true; }
+  try {
+    const r = await fetch(DBX_TOKEN, { method: "POST", body: new URLSearchParams({ grant_type: "authorization_code", code: q.get("code"), client_id: appKey(), code_verifier: S.meta.pkce.v, redirect_uri: DBX_REDIRECT }) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.refresh_token) throw new Error(j.error_description || j.error || "HTTP " + r.status);
+    S.meta.dbx = { refresh: j.refresh_token, access: j.access_token, expires: Date.now() + (j.expires_in || 14400) * 1000 };
+    S.meta.pkce = null; S.meta.dbxRev = null; S.meta.syncError = null; S.meta.conflict = null; S.meta.sentFiles = []; await saveMeta();
+    toast(matchMedia("(display-mode: standalone)").matches ? "Dropbox connected" : "Dropbox connected. You can close this tab and open My Real Estate from your home screen.");
+  } catch (e) { S.meta.pkce = null; S.meta.syncError = "Dropbox sign-in failed: " + (e.message || e); await saveMeta(); toast(S.meta.syncError); }
+  return true;
+}
+async function dbxToken() {
+  const d = S.meta.dbx; if (!d || !d.refresh) throw new Error("Dropbox is not connected");
+  if (d.access && d.expires > Date.now() + 60000) return d.access;
+  const r = await fetch(DBX_TOKEN, { method: "POST", body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: d.refresh, client_id: appKey() }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { if (j.error === "invalid_grant") { S.meta.dbx = null; S.meta.syncError = "Dropbox access was removed or has expired. Connect Dropbox again."; await saveMeta(); } throw new Error(j.error_description || j.error || "HTTP " + r.status); }
+  d.access = j.access_token; d.expires = Date.now() + (j.expires_in || 14400) * 1000; await saveMeta(); return d.access;
+}
+async function dbxCall(url, opt = {}, retry = true) {
+  const tok = await dbxToken();
+  const r = await fetch(url, { method: "POST", ...opt, headers: { ...(opt.headers || {}), Authorization: "Bearer " + tok } });
+  if (r.status === 401 && retry) { S.meta.dbx.access = null; return dbxCall(url, opt, false); }
+  if (r.status === 429 && retry) { await sleep(3000); return dbxCall(url, opt, false); }
+  if (!r.ok) { const t = await r.text().catch(() => ""); let s = t; try { s = JSON.parse(t).error_summary || t; } catch {} throw new DbxErr("Dropbox " + r.status + ": " + String(s).slice(0, 120), r.status, String(s)); }
+  return r;
+}
+async function dbxApi(ep, arg) { const r = await dbxCall("https://api.dropboxapi.com/2/" + ep, arg === undefined ? {} : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(arg) }); const t = await r.text(); return t ? JSON.parse(t) : null; }
+async function dbxMeta(path) { try { return await dbxApi("files/get_metadata", { path }); } catch (e) { if (notFound(e)) return null; throw e; } }
+async function dbxUpload(path, body, mode) { const r = await dbxCall("https://content.dropboxapi.com/2/files/upload", { headers: { "Content-Type": "application/octet-stream", "Dropbox-API-Arg": dbxArg({ path, mode: mode || "overwrite", autorename: false, mute: true }) }, body }); return r.json(); }
+async function dbxDownload(path) { const r = await dbxCall("https://content.dropboxapi.com/2/files/download", { headers: { "Dropbox-API-Arg": dbxArg({ path }) } }); return r.blob(); }
+async function dbxList(path) { try { let j = await dbxApi("files/list_folder", { path }), out = j.entries; while (j.has_more) { j = await dbxApi("files/list_folder/continue", { cursor: j.cursor }); out = out.concat(j.entries); } return out; } catch (e) { if (notFound(e)) return []; throw e; } }
+
+/* Both phones can edit at the same time: each property carries the time it last changed (_t), deletions are remembered, and every sync
+   merges the two copies property by property — the most recent change wins. Settings travel as one piece (latest wins). */
+const filePath = f => `/live/photos/${f.id}.jpg`;
+async function localData(files) { files = files || await dbAll("files"); return { props: await dbAll("props"), settings: S.meta.settings || null, deleted: S.meta.tomb || {}, gen: S.meta.gen || null, files: files.map(f => ({ id: f.id, type: f.type, path: filePath(f) })) }; }
+async function pushFiles(files) {
+  files = files || await dbAll("files"); const sent = new Set(S.meta.sentFiles || []); let n = 0;
+  for (const f of files) { if (sent.has(f.id)) continue; await dbxUpload(filePath(f), f.blob, "overwrite"); sent.add(f.id); n++; }
+  if (n) { S.meta.sentFiles = [...sent]; await saveMeta(); }
+}
+const wrap = d => JSON.stringify({ app: APP_ID, schema: BACKUP_VERSION, appVersion: APP_VERSION, updatedAt: new Date().toISOString(), owner: S.meta.deviceId, ownerName: ownerName(), data: d });
+async function payloadJSON() { return wrap(await localData()); }
+function readPayload(j) { const d = j && (j.data || j); if (!d || !Array.isArray(d.props)) throw new Error("That isn't a My Real Estate copy");
+  return { props: d.props, settings: d.settings || null, deleted: d.deleted || {}, gen: d.gen || null, files: Array.isArray(d.files) ? d.files : [], photos: d.photos || null }; }
+const tOf = r => (r && r._t) || 0;
+function mergeData(L, R) {
+  const deleted = { ...(R.deleted || {}) }; for (const [id, t] of Object.entries(L.deleted || {})) deleted[id] = Math.max(deleted[id] || 0, t);
+  const m = new Map(); for (const r of [...L.props, ...R.props]) { const c = m.get(r.id); if (!c || tOf(r) > tOf(c)) m.set(r.id, r); }
+  const props = [...m.values()].filter(r => !(deleted[r.id] && deleted[r.id] >= tOf(r)));
+  const settings = tOf(L.settings) >= tOf(R.settings) ? L.settings || R.settings : R.settings;
+  const fm = new Map(); for (const f of [...(R.files || []), ...(L.files || [])]) if (!deleted[f.id]) fm.set(f.id, f);
+  return { props, settings, deleted, gen: R.gen || L.gen, files: [...fm.values()] };
+}
+const sig = d => JSON.stringify([d.props.map(r => r.id + ":" + tOf(r)).sort(), (d.files || []).map(f => f.id).sort(), tOf(d.settings), Object.keys(d.deleted || {}).length, d.gen]);
+async function applyData(d, wholesale) {
+  const [lp, lf] = await Promise.all([dbAll("props"), dbAll("files")]);
+  const have = new Set(lf.map(f => f.id)), want = new Set((d.files || []).map(f => f.id));
+  const missing = (d.files || []).filter(f => !have.has(f.id));
+  for (const f of missing) {
+    if (d.photos && d.photos[f.id]) { f._blob = await (await fetch(d.photos[f.id])).blob(); continue; } // from a backup file
+    if (dbxOn()) { try { f._blob = await dbxDownload(f.path || filePath(f)); f._fromDbx = true; } catch (e) { if (!notFound(e)) throw e; } }
+  }
+  _quiet++;
+  try {
+    const lm = new Map(lp.map(r => [r.id, r])), nm = new Set(d.props.map(r => r.id));
+    for (const r of d.props) { const c = lm.get(r.id); if (!c || tOf(c) !== tOf(r) || wholesale) await dbPut("props", r); }
+    for (const r of lp) if (!nm.has(r.id)) await dbDel("props", r.id);
+    for (const f of lf) if (!want.has(f.id)) { await dbDel("files", f.id); if (S.urls[f.id]) { URL.revokeObjectURL(S.urls[f.id]); delete S.urls[f.id]; } }
+    for (const f of missing) if (f._blob) await dbPut("files", { id: f.id, type: f.type || "image/jpeg", blob: new Blob([f._blob], { type: f.type || "image/jpeg" }) });
+  } finally { _quiet--; }
+  const sent = new Set(S.meta.sentFiles || []); for (const f of missing) if (f._fromDbx) sent.add(f.id); S.meta.sentFiles = [...sent];
+  if (d.settings) S.meta.settings = d.settings;
+  S.meta.tomb = d.deleted || {}; S.meta.gen = d.gen || S.meta.gen;
+  await saveMeta(); S.props = await dbAll("props"); resCache.clear();
+}
+async function pushLive(mode, data) {
+  const seq = S.meta.seq; await pushFiles();
+  if (!S.meta.gen) S.meta.gen = uid("g");
+  const res = await dbxUpload(LIVE, wrap(data || await localData()), mode || (S.meta.dbxRev ? { ".tag": "update", update: S.meta.dbxRev } : "add"));
+  S.meta.dbxRev = res.rev; S.meta.lastSync = Date.now(); S.meta.syncError = null; S.meta.conflict = null; S.meta.genPending = false;
+  if (S.meta.seq === seq) { S.meta.dirty = false; S.meta.changes = 0; }
+  await saveMeta();
+}
+async function adoptRemote() {
+  const rm = await dbxMeta(LIVE); if (!rm) return;
+  const d = readPayload(JSON.parse(await (await dbxDownload(LIVE)).text()));
+  await applyData(d, true); S.meta.gen = d.gen;
+  S.meta.dbxRev = rm.rev; S.meta.dirty = false; S.meta.changes = 0; S.meta.seq = (S.meta.seq || 0) + 1; S.meta.conflict = null; S.meta.genPending = false; S.meta.lastSync = Date.now(); S.meta.syncError = null; await saveMeta();
+  render();
+}
+function scheduleSync(ms = 4000) { clearTimeout(syncT); if (dbxOn()) syncT = setTimeout(() => dbxSync(), ms); }
+async function syncOnce() {
+  const rm = await dbxMeta(LIVE);
+  if (!rm) { if (hasData() || S.meta.dirty) await pushLive("add"); else { S.meta.lastSync = Date.now(); S.meta.syncError = null; await saveMeta(); } return "pushed"; }
+  if (rm.rev === S.meta.dbxRev && !S.meta.dirty && !S.meta.genPending) { S.meta.lastSync = Date.now(); S.meta.syncError = null; await saveMeta(); return "none"; }
+  const R = readPayload(JSON.parse(await (await dbxDownload(LIVE)).text()));
+  if (S.meta.genPending) { try { await dbxApi("files/copy_v2", { from_path: LIVE, to_path: snapName("replaced"), autorename: true }); } catch {} await pushLive({ ".tag": "update", update: rm.rev }); return "pushed"; }
+  if (S.meta.gen && R.gen && R.gen !== S.meta.gen) {
+    if (S.meta.dirty) { S.meta.conflict = { rev: rm.rev, when: rm.server_modified }; await saveMeta(); return "conflict"; }
+    await adoptRemote(); return "adopted";
+  }
+  const L = await localData(), M = mergeData(L, R);
+  if (sig(M) !== sig(L)) await applyData(M);
+  if (sig(M) !== sig(R) || S.meta.dirty) await pushLive({ ".tag": "update", update: rm.rev }, { ...(await localData()), gen: M.gen });
+  else { S.meta.dbxRev = rm.rev; S.meta.lastSync = Date.now(); S.meta.syncError = null; S.meta.dirty = false; S.meta.changes = 0; S.meta.gen = M.gen; await saveMeta(); }
+  return sig(M) !== sig(L) ? "merged" : "pushed";
+}
+async function dbxSync(opts = {}) {
+  if (!dbxOn() || syncing) return;
+  if (!navigator.onLine) { if (opts.manual) toast("You're offline. Changes will go to Dropbox when you're back online."); paintStatus(); return; }
+  if (mobileBlocked() && !opts.manual) { paintStatus(); return; }
+  syncing = true; paintStatus(); let ok = false, failed = false, res = "";
+  try {
+    for (let i = 0; i < 4; i++) { try { res = await syncOnce(); break; } catch (e) { if (e instanceof DbxErr && e.status === 409 && /conflict/.test(e.summary) && i < 3) { await sleep(400 + Math.random() * 800); continue; } throw e; } }
+    ok = res !== "conflict";
+    if (res === "merged" || res === "adopted") toast("Updated with changes from the other phone");
+  } catch (e) {
+    failed = true; S.meta.syncError = (!navigator.onLine || e instanceof TypeError) ? "Couldn't reach Dropbox. It will try again shortly." : String(e.message || e);
+    await saveMeta(); if (opts.manual) toast(S.meta.syncError);
+  } finally { syncing = false; }
+  if (ok && opts.manual) toast("Dropbox is up to date");
+  if (ok && hasData()) maybeSnapshot(false).catch(() => {});
+  if (res === "merged" || res === "adopted" || (S.tab === "settings" && S.set === "backup")) { S._keepScroll = true; render(); } else paintStatus();
+  clearTimeout(retryT); if (failed && dbxOn()) retryT = setTimeout(() => dbxSync(), 120000);
+  if (ok && S.meta.dirty) scheduleSync(1500);
+}
+async function maybeSnapshot(force) {
+  const day = new Date().toDateString(); if (!force && S.meta.lastSnapDay === day) return; await pushFiles();
+  const body = await payloadJSON(), d = new Date();
+  await dbxUpload(snapName(force ? "manual" : ""), body, "overwrite");
+  await dbxUpload(`/archive/myrealestate-${d.getFullYear()}-${p2(d.getMonth() + 1)}.json`, body, "overwrite");
+  S.meta.lastSnapDay = day; S.meta.lastSnap = Date.now(); await saveMeta();
+  pruneSnapshots().catch(() => {});
+}
+async function pruneSnapshots() {
+  const cut = Date.now() - 60 * 864e5, acut = new Date(new Date().getFullYear() - 8, new Date().getMonth(), 1).getTime();
+  for (const e of await dbxList("/snapshots")) { const m = e.name.match(/(\d{4})-(\d{2})-(\d{2})/); if (e[".tag"] === "file" && m && new Date(+m[1], m[2] - 1, +m[3]).getTime() < cut) { try { await dbxApi("files/delete_v2", { path: e.path_lower }); } catch {} } }
+  for (const e of await dbxList("/archive")) { const m = e.name.match(/(\d{4})-(\d{2})\.json$/); if (e[".tag"] === "file" && m && new Date(+m[1], m[2] - 1, 1).getTime() < acut) { try { await dbxApi("files/delete_v2", { path: e.path_lower }); } catch {} } }
+}
+async function snapshotBeforeReplace() { if (!dbxOn() || !hasData()) return true; try { await pushFiles(); await dbxUpload(snapName("before-restore"), await payloadJSON(), "overwrite"); return true; } catch (e) { toast("Couldn't save a snapshot to Dropbox first, so nothing was changed. Check you're online."); return false; } }
+async function listSnapshots() {
+  const el = $("#snapList"); if (!el) return; el.innerHTML = `<p class="small muted" style="margin:0">Looking in Dropbox…</p>`;
+  try {
+    const list = [...(await dbxList("/snapshots")), ...(await dbxList("/archive"))].filter(e => e[".tag"] === "file" && /\.json$/i.test(e.name)).sort((a, b) => String(b.server_modified).localeCompare(String(a.server_modified)));
+    el.innerHTML = list.length ? `<div class="list">${list.slice(0, 80).map(e => `<div class="li" style="cursor:default;padding-inline:0"><span class="t"><b>${esc(fmtWhen(e.server_modified))}</b><span>${/archive/.test(e.path_lower) ? "Monthly archive · " : /before-restore/.test(e.name) ? "Saved before a restore · " : /replaced/.test(e.name) ? "Dropbox copy that was replaced · " : /manual/.test(e.name) ? "Snapshot now · " : "Daily · "}${(e.size / 1024).toFixed(0)} KB</span></span><button type="button" class="btn sm" data-act="dbxUse" data-path="${esc(e.path_lower)}">Use this</button></div>`).join("")}</div>` : `<p class="small muted" style="margin:0">No snapshots in Dropbox yet.</p>`;
+  } catch (e) { el.innerHTML = `<p class="small" style="color:var(--neg);margin:0">Couldn't list Dropbox snapshots: ${esc(e.message || e)}</p>`; }
+}
+async function useSnapshot(path) {
+  if (!navigator.onLine) { toast("You're offline."); return; }
+  if (!confirm("Use this snapshot? It replaces the properties on both phones. The current copy is saved as a snapshot first.")) return;
+  try {
+    const d = readPayload(JSON.parse(await (await dbxDownload(path)).text()));
+    if (!(await snapshotBeforeReplace())) return;
+    await applyData(d, true);
+    S.meta.conflict = null; S.meta.gen = uid("g"); S.meta.genPending = true; markDirty();
+    toast(`Snapshot restored: ${S.props.length} properties`); render();
+  } catch (e) { toast("That snapshot couldn't be used: " + (e.message || e)); }
+}
+async function resolveConflict(useDropbox) {
+  if (!navigator.onLine) { toast("You're offline. Try again when you're online."); return; }
+  syncing = true; paintStatus();
+  try {
+    if (useDropbox) { if (hasData()) await dbxUpload(snapName("before-restore"), await payloadJSON(), "overwrite"); syncing = false; await adoptRemote(); toast("Using the Dropbox copy. This phone's copy was saved as a snapshot."); }
+    else { try { await dbxApi("files/copy_v2", { from_path: LIVE, to_path: snapName("replaced"), autorename: true }); } catch {} S.meta.gen = uid("g"); await pushLive("overwrite"); toast("Kept this phone's copy. The Dropbox copy was saved as a snapshot."); }
+  } catch (e) { toast("That didn't work: " + (e.message || e)); }
+  syncing = false; render();
+}
+async function dbxDisconnect() {
+  try { await dbxApi("auth/token/revoke"); } catch {}
+  S.meta.dbx = null; S.meta.dbxRev = null; S.meta.conflict = null; S.meta.syncError = null; S.meta.sentFiles = []; await saveMeta();
+  clearTimeout(syncT); render(); toast("Dropbox disconnected. Everything already in Dropbox is kept.");
+}
+function dropboxPanel() {
+  const m = S.meta;
+  if (!dbxOn()) return `<div class="card" id="dbxPanel"><h2>Dropbox</h2>
+    <p style="margin:0" class="small">Connect Dropbox and every property, photo and setting is kept there as well as on this phone, and shared with the other phone. Changes go when you're on Wi‑Fi; a full snapshot is saved each day and one copy per month is kept for 8 years.</p>
+    <p style="margin:0" class="small">Use the <b>same Dropbox account</b> on both phones. If a phone is lost, cleared or replaced, connect Dropbox on the new one and everything comes back.</p>
+    ${DBX_APP_KEY ? "" : `<div class="field"><label for="dbxKey">Dropbox App key</label><input id="dbxKey" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(m.dbxKey || "")}" placeholder="from the Dropbox App Console"><span class="hint">Redirect URI to enter in the App Console: <b>${esc(DBX_REDIRECT)}</b></span></div>`}
+    <div class="row"><button type="button" class="btn primary" data-act="dbxConnect">Connect Dropbox</button></div>
+    <p class="xs muted" style="margin:0">My Real Estate can only see its own folder in Dropbox › Apps. It can't see anything else in your Dropbox.</p></div>`;
+  const st = syncText();
+  return `${m.conflict ? `<div class="card" style="border:2px solid var(--warn)"><h2>Which copy do you want to keep?</h2><p style="margin:0" class="small">Dropbox has a copy saved ${m.conflict.when ? fmtWhen(m.conflict.when) : "recently"} that's different from this phone, and this phone has changes that haven't been sent yet. Whichever you don't keep is saved as a snapshot first.</p><div class="row"><button type="button" class="btn primary" data-act="conflictDropbox">Use the Dropbox copy</button><button type="button" class="btn" data-act="conflictPhone">Keep this phone's copy</button></div></div>` : ""}
+  <div class="card" id="dbxPanel"><h2>Dropbox</h2>
+    <dl class="kv"><dt>Status</dt><dd id="dbxStatus">${esc(cap1(st.t.replace(" · tap", "")))}</dd><dt>Last sync</dt><dd>${esc(fmtWhen(m.lastSync))}</dd><dt>Last snapshot</dt><dd>${esc(fmtWhen(m.lastSnap))}</dd></dl>
+    ${m.syncError ? `<div class="banner bad"><span>${esc(m.syncError)}</span></div>` : ""}
+    <div class="row"><button type="button" class="btn primary" data-act="dbxSyncNow" ${syncing ? "disabled" : ""}>Sync now</button><button type="button" class="btn" data-act="dbxSnap">Snapshot now</button></div>
+    <label class="check"><input type="checkbox" id="wifiOnly" ${wifiOnly() ? "checked" : ""}> Only sync on Wi‑Fi (Sync now still works on mobile data)</label>
+    <div class="row"><button type="button" class="btn" data-act="dbxList">Restore a Dropbox snapshot…</button><button type="button" class="btn danger" data-act="dbxDisconnect">Disconnect</button></div>
+    <div id="snapList"></div>
+    <p class="xs muted" style="margin:0">In Dropbox › Apps › MyRealEstate: <b>live</b> is the current copy (photos in <b>live/photos</b>), <b>snapshots</b> holds one copy per day for 60 days, and <b>archive</b> one copy per month for 8 years.</p></div>`;
+}
+
+/* ================= start ================= */
+async function boot() {
+  await openDB();
+  const m = (await dbAll("meta")).find(x => x.id === "meta");
+  S.meta = m || { created: todayISO(), deviceId: uid("d") };
+  S.props = await dbAll("props");
+  if (!m) { // first open on this phone: preloaded properties (they carry fixed ids and _t 0, so any edit from either phone wins when syncing)
+    _quiet++; try { for (const p of SEED.PROPERTIES) await tx("props", "readwrite", os => os.put(clone(p))); } finally { _quiet--; }
+    S.props = await dbAll("props"); await saveMeta();
+  }
+  const back = await dbxReturn();
+  if (back) { S.tab = "settings"; S.set = "backup"; }
+  const q = new URLSearchParams(location.search);
+  if (q.get("go") === "quick") S.tab = "quick";
+  render();
+  annualPopup();
+  if (dbxOn()) dbxSync();
+  addEventListener("online", () => scheduleSync(800));
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && dbxOn()) scheduleSync(500); });
+  if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+}
+boot().catch(e => { document.body.innerHTML = `<p style="padding:20px;font-family:sans-serif">My Real Estate couldn't start: ${esc(e.message || e)}</p>`; });

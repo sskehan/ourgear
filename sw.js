@@ -1,56 +1,16 @@
-/* Our Gear service worker. Bump CACHE with every release. */
-const CACHE = 'ourgear-1.0';
-const SHELL = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest',
-  './icons/icon.svg', './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png'];
-
-self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
-  self.skipWaiting();
-});
-
-self.addEventListener('activate', (e) => {
-  e.waitUntil(caches.keys()
-    .then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
-    .then(() => self.clients.claim()));
-});
-
-self.addEventListener('fetch', (e) => {
-  const url = new URL(e.request.url);
-  if (e.request.method === 'POST' && url.origin === location.origin && url.pathname.endsWith('/share')) {
-    e.respondWith(handleShare(e.request));
+// My Real Estate — offline support. Bump VERSION when you change any app file.
+const VERSION = "mre-v1.01";
+const SHELL = ["./", "index.html", "app.js", "engine.js", "data.js", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
+self.addEventListener("install", e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())); });
+self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== VERSION && k !== "mre-fonts").map(k => caches.delete(k)))).then(() => self.clients.claim())); });
+self.addEventListener("fetch", e => {
+  const u = new URL(e.request.url);
+  if (e.request.method !== "GET") return;
+  if (u.host === "fonts.googleapis.com" || u.host === "fonts.gstatic.com") {
+    e.respondWith(caches.open("mre-fonts").then(async c => { const hit = await c.match(e.request); const net = fetch(e.request).then(r => { c.put(e.request, r.clone()); return r; }).catch(() => hit); return hit || net; }));
     return;
   }
-  if (e.request.method !== 'GET' || url.origin !== location.origin) return;
-  if (e.request.mode === 'navigate') {
-    e.respondWith(caches.match('./index.html').then((r) => r || fetch(e.request)));
-    return;
-  }
-  e.respondWith(caches.match(e.request, { ignoreSearch: true }).then((r) => r || fetch(e.request)));
+  if (u.origin !== location.origin) return;
+  // App files: network first when online, skipping the browser cache so updates arrive straight away; cached copy when offline.
+  e.respondWith(fetch(e.request.url, { cache: "no-cache" }).then(r => { if (r.ok) caches.open(VERSION).then(c => c.put(e.request, r.clone())); return r; }).catch(() => caches.match(e.request, { ignoreSearch: true }).then(r => r || caches.match("index.html"))));
 });
-
-function openDb() {
-  return new Promise((res, rej) => {
-    const r = indexedDB.open('ourgear', 1);
-    r.onupgradeneeded = () => {
-      const d = r.result;
-      ['kv', 'blobs', 'thumbs', 'share'].forEach((s) => { if (!d.objectStoreNames.contains(s)) d.createObjectStore(s); });
-    };
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
-}
-
-async function handleShare(request) {
-  try {
-    const fd = await request.formData();
-    const files = fd.getAll('files').filter((f) => f && f.size);
-    const db = await openDb();
-    await new Promise((res, rej) => {
-      const t = db.transaction('share', 'readwrite');
-      const s = t.objectStore('share');
-      files.forEach((f, i) => s.put({ blob: f, name: f.name || 'shared', type: f.type || '' }, Date.now() + '-' + i));
-      t.oncomplete = res; t.onerror = () => rej(t.error);
-    });
-  } catch (err) { /* fall through to the app; it will show nothing new */ }
-  return Response.redirect('./?share=1#/inbox', 303);
-}
