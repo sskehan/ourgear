@@ -1,12 +1,17 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.04';
+const APP_VERSION = '1.05';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
-const OWNERS = ['Shaun', 'Lyndsey', 'Shared'];
+const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
 const PROPERTY_TYPES = ['Main residence', 'Investment', 'Holiday home', 'Other'];
 const FILE_KINDS = ['Receipt', 'Tax invoice', 'Warranty card', 'Manual', 'Photo', 'Serial plate', 'Certificate', 'Claim pack', 'Other'];
+/* Kinds of file: receipts carry store/date/total; photos carry nothing; other documents just a date. */
+const RECEIPT_KINDS = ['Receipt', 'Tax invoice'];
+const PHOTO_KINDS = ['Photo', 'Serial plate'];
+function kindGroup(k) { return RECEIPT_KINDS.includes(k) ? 'receipt' : PHOTO_KINDS.includes(k) ? 'photo' : 'doc'; }
+const SNAP_TYPES = [['receipt', 'Receipt or invoice', 'Receipt'], ['photo', 'Item photo', 'Photo'], ['doc', 'Other document', 'Warranty card']];
 const ITEM_STATUS = ['Active', 'Sold', 'Disposed', 'Replaced'];
 const THEMES = [
   { id: 'midnight', name: 'Midnight and blue', a: '#0B1220', b: '#2F6BFF' },
@@ -20,6 +25,7 @@ const DEFAULT_LISTS = {
   locations: ['Kitchen', 'Laundry', 'Living', 'Dining', 'Bedroom 1', 'Bedroom 2', 'Bedroom 3', 'Bedroom 4', 'Bathroom', 'Ensuite',
     'Garage', 'Shed', 'Under house', 'Yard', 'Roof', 'Server cupboard'],
   warrantyTypes: ['Maker', 'Extended', 'Installer', 'Workmanship', 'Store'],
+  people: OWNERS.slice(),
   properties: [{ id: 'home', name: 'Home', type: 'Main residence', address: '' }],
   updatedAt: 0
 };
@@ -89,6 +95,8 @@ function itemWarranties(itemId) { return live('warranties').filter((w) => w.item
 function itemFiles(itemId) { return live('files').filter((f) => f.itemId === itemId); }
 function inboxFiles() { return live('files').filter((f) => !f.itemId || !D.items[f.itemId] || D.items[f.itemId].deleted); }
 function propById(id) { return D.lists.properties.find((p) => p.id === id) || null; }
+/* People things can belong to (editable in Settings). */
+function peopleList() { return D && D.lists && D.lists.people && D.lists.people.length ? D.lists.people : OWNERS; }
 function propName(id) { const p = propById(id); return p ? p.name : 'No property'; }
 
 /* Merge another copy of the data into ours: newest record wins, by id. */
@@ -501,10 +509,13 @@ async function quickCompress(file) {
 
 /* ---------- crop screen state ---------- */
 let SNAP = null; // { step, file, isPdf, src, quarter, deg, docMode, work, crop, view, itemId, result }
-async function startSnap(file, itemId) {
+async function startSnap(file, itemId, type) {
   const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
-  SNAP = { step: isPdf ? 'details' : 'crop', file, isPdf, quarter: 0, deg: 0, docMode: true, itemId: itemId || null,
-    kind: isPdf ? 'Tax invoice' : 'Receipt', date: todayISO(), store: '', total: '' };
+  let t = type || 'receipt';
+  if (isPdf && t === 'photo') t = 'doc';
+  const kind = isPdf && t === 'receipt' ? 'Tax invoice' : (SNAP_TYPES.find((x) => x[0] === t) || SNAP_TYPES[0])[2];
+  SNAP = { step: isPdf ? 'details' : 'crop', file, isPdf, quarter: 0, deg: 0, docMode: t !== 'photo', itemId: itemId || null,
+    kind, type: t, date: todayISO(), store: '', total: '' };
   if (!isPdf) {
     try { SNAP.src = await loadSource(file); }
     catch (e) { toast('Could not read that image'); SNAP = null; return; }
@@ -630,10 +641,11 @@ function syncButton() {
 }
 
 /* ---------- views ---------- */
-let ITEMS_F = { q: '', prop: 'all', cat: '', arch: false, st: 'all' };
+let ITEMS_F = { q: '', prop: 'all', cat: '', arch: false, st: 'all', owner: '' };
 const ST_FILTERS = [['all', 'Any warranty'], ['soon', 'Expiring soon'], ['ok', 'Covered'], ['life', 'Lifetime'], ['gone', 'Expired'], ['nowar', 'No warranty']];
 let ITEM_TAB = 'details';
 let SNAP_TARGET = null;
+let SNAP_TYPE = 'receipt';
 
 function viewHome() {
   const items = live('items').filter((i) => !i.archived);
@@ -684,7 +696,7 @@ function filteredItems() {
   const q = ITEMS_F.q.trim().toLowerCase();
   const byItem = groupBy(live('warranties'), 'itemId');
   return live('items').filter((i) => (ITEMS_F.arch || !i.archived) &&
-    (ITEMS_F.prop === 'all' || i.propertyId === ITEMS_F.prop) && (!ITEMS_F.cat || i.category === ITEMS_F.cat) &&
+    (ITEMS_F.prop === 'all' || i.propertyId === ITEMS_F.prop) && (!ITEMS_F.cat || i.category === ITEMS_F.cat) && (!ITEMS_F.owner || i.owner === ITEMS_F.owner) &&
     (!q || [i.name, i.brand, i.model, i.serial, i.store, i.notes, i.location, i.spot].some((v) => v && String(v).toLowerCase().includes(q))))
     .sort((a, b) => a.name.localeCompare(b.name))
     .map((i) => ({ i, st: i.archived ? { kind: 'arch', label: 'Archived' } : itemStatus(i, byItem[i.id] || []), all: (byItem[i.id] || []).map((w) => warrantyStatus(w, i).kind) }))
@@ -698,7 +710,7 @@ function itemsListHTML() {
   if (!rows.length) return '<div class="card empty">' + (live('items').length ? 'No items match.' : 'No items yet. Snap a receipt or tap + to add one.') + '</div>';
   return '<div class="card list">' + rows.map(({ i, st }) =>
     '<a class="row" href="#/item/' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
-    esc([i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : ''), live('claims').some((c) => c.itemId === i.id && isOpenClaim(c)) ? 'claim open' : ''].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>';
+    esc([i.owner && i.owner !== 'Shared' ? i.owner + '\'s' : '', i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : ''), live('claims').some((c) => c.itemId === i.id && isOpenClaim(c)) ? 'claim open' : ''].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>';
 }
 function viewItems() {
   const props = D.lists.properties;
@@ -708,7 +720,8 @@ function viewItems() {
     props.map((p) => '<button class="chip" data-act="fprop" data-v="' + esc(p.id) + '" aria-pressed="' + (ITEMS_F.prop === p.id) + '">' + esc(p.name) + '</button>').join('') +
     '<button class="chip" data-act="farch" aria-pressed="' + ITEMS_F.arch + '">Include archived</button></div>';
   h += '<div class="grid2"><label class="field"><span>Warranty</span><select id="fst">' + ST_FILTERS.map(([k, l]) => opt(k, ITEMS_F.st, l)).join('') + '</select></label>' +
-    '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label></div>';
+    '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label></div>' +
+    '<label class="field"><span>Belongs to</span><select id="fowner">' + opt('', ITEMS_F.owner, 'Anyone') + peopleList().map((o) => opt(o, ITEMS_F.owner)).join('') + '</select></label>';
   h += '<div class="muted" id="itemcount"></div><div id="itemlist">' + itemsListHTML() + '</div></main>';
   return h + nav('items');
 }
@@ -724,7 +737,7 @@ function viewItem(id) {
   if (it.archived) h += '<div class="note">Archived. Files are in the Dropbox archive folder and still searchable. <button class="btn quiet" style="margin-top:8px;width:100%" data-act="restore" data-id="' + id + '">Restore</button></div>';
   if (ITEM_TAB === 'details') {
     const kv = [['Category', it.category], ['Brand', it.brand], ['Model', it.model], ['Serial', it.serial],
-      ['Property', p ? p.name + ' (' + p.type + ')' : ''], ['Location', it.location], ['Exact spot', it.spot], ['Owner', it.owner],
+      ['Property', p ? p.name + ' (' + p.type + ')' : ''], ['Location', it.location], ['Exact spot', it.spot], ['Belongs to', it.owner],
       ['Store', it.store], ['Purchased', fmtDate(it.purchaseDate)], ['Installed', fmtDate(it.installDate)], ['Price paid', fmtMoney(it.price)],
       ['Replacement value', fmtMoney(it.replacementValue)], ['Status', it.status || 'Active'], ['Work deduction', it.work ? 'Yes' : ''], ['Notes', it.notes]]
       .filter((r) => r[1]);
@@ -781,7 +794,7 @@ function viewItemEdit(id) {
   h += f('serial', 'Serial number', it.serial);
   h += '<label class="field"><span>Property</span><select name="propertyId">' + D.lists.properties.map((p) => opt(p.id, it.propertyId, p.name + ' (' + p.type + ')')).join('') + '</select></label>';
   h += '<div class="grid2"><label class="field"><span>Location</span><input name="location" list="locs" value="' + esc(it.location || '') + '" placeholder="Living"></label>' +
-    '<label class="field"><span>Owner</span><select name="owner">' + OWNERS.map((o) => opt(o, it.owner)).join('') + '</select></label></div>';
+    '<label class="field"><span>Belongs to</span><select name="owner">' + peopleList().concat(it.owner && !peopleList().includes(it.owner) ? [it.owner] : []).map((o) => opt(o, it.owner)).join('') + '</select></label></div>';
   h += '<datalist id="locs">' + D.lists.locations.map((l) => '<option value="' + esc(l) + '">').join('') + '</datalist>';
   h += f('spot', 'Exact spot', it.spot, 'text', 'placeholder="Indoor unit north wall, outdoor unit side path"');
   h += '<label class="field"><span>Store</span><input name="store" list="stores" value="' + esc(it.store || '') + '"></label><datalist id="stores">' + stores.map((s) => '<option value="' + esc(s) + '">').join('') + '</datalist>';
@@ -833,11 +846,15 @@ function viewInbox() {
 function viewSnap() {
   if (!SNAP) {
     const target = SNAP_TARGET && D.items[SNAP_TARGET];
-    let h = header(target ? 'Add file' : 'Snap', { back: target ? '#/item/' + target.id : '', sub: target ? target.name : 'Receipts, invoices, manuals and photos' });
-    h += '<main><div class="snapstart">' +
+    const tip = { receipt: 'Receipts are cleaned up in black and white and read for you. Snap thermal receipts on the day, before they fade.',
+      photo: 'Item photos are kept in colour. No details to fill in.', doc: 'Manuals, warranty cards and certificates. Photo or PDF.' }[SNAP_TYPE];
+    let h = header(target ? 'Add to ' + target.name : 'Snap', { back: target ? '#/item/' + target.id : '' });
+    h += '<main><div class="snapstart"><h2>What are you adding?</h2><div class="typechoice">' + SNAP_TYPES.map(([k, l]) =>
+      '<button class="typebtn" data-act="snaptype" data-v="' + k + '" aria-pressed="' + (SNAP_TYPE === k) + '">' + (k === 'receipt' ? I.doc : k === 'photo' ? I.cam : I.doc) + '<span>' + l + '</span></button>').join('') + '</div>' +
+      '<p class="muted">' + esc(tip) + '</p>' +
       '<label class="btn primary big" for="camIn">' + I.cam + 'Take photo</label><input id="camIn" class="sr" type="file" accept="image/*" capture="environment">' +
-      '<label class="btn big" for="pickIn">Choose photo or PDF</label><input id="pickIn" class="sr" type="file" accept="image/*,application/pdf">' +
-      '<p class="muted">Tip: snap thermal receipts on the day. They fade.</p></div></main>';
+      '<label class="btn big" for="pickIn">' + (SNAP_TYPE === 'photo' ? 'Choose from gallery' : 'Choose photo or PDF') + '</label><input id="pickIn" class="sr" type="file" accept="' + (SNAP_TYPE === 'photo' ? 'image/*' : 'image/*,application/pdf') + '">' +
+      '</div></main>';
     return h + nav('snap');
   }
   if (SNAP.step === 'crop') {
@@ -846,20 +863,19 @@ function viewSnap() {
       '<div id="cropwrap" class="cropwrap"><canvas id="cropcanvas"></canvas><div id="croprect" class="croprect">' +
       '<span class="h tl" data-c="tl"></span><span class="h tr" data-c="tr"></span><span class="h bl" data-c="bl"></span><span class="h br" data-c="br"></span></div></div>' +
       '<div class="btns three"><button class="darkbtn" data-act="rot">Rotate</button><button class="darkbtn" data-act="cropall">Full photo</button>' +
-      '<button class="darkbtn" data-act="docmode" aria-pressed="' + SNAP.docMode + '">Document</button></div>' +
+      '<button class="darkbtn" data-act="docmode" aria-pressed="' + SNAP.docMode + '">' + (SNAP.docMode ? 'Black and white' : 'Colour') + '</button></div>' +
       '<label class="slider">Straighten<input id="deg" type="range" min="-15" max="15" step="0.5" value="' + SNAP.deg + '"><span id="degv">' + SNAP.deg + '°</span></label>' +
-      '<button class="btn primary big" data-act="cropnext">Next</button></div></main>';
+      (kindGroup(SNAP.kind) === 'photo'
+        ? (SNAP.itemId && D.items[SNAP.itemId] ? '<button class="btn primary big" data-act="photosave" data-v="item">Save photo</button>'
+          : '<div class="btns"><button class="btn" data-act="photosave" data-v="inbox">Save to inbox</button><button class="btn primary" data-act="photosave" data-v="file">File to item</button></div>')
+        : '<button class="btn primary big" data-act="cropnext">Next</button>') + '</div></main>';
     return h + nav('snap');
   }
   const it = SNAP.itemId && D.items[SNAP.itemId];
   let h = header('Details', { right: '<button class="iconbtn" data-act="snapcancel" aria-label="Cancel" style="font-size:14px;width:auto;padding:0 8px">Cancel</button>', sub: it ? 'For ' + it.name : '' });
   h += '<main><img class="preview" id="snapprev" alt="' + (SNAP.isPdf ? 'First page of the PDF' : 'Cropped image') + '">';
-  if (S.autoRead) h += '<div class="muted" id="ocrmsg">' + esc(SNAP.ocrMsg || (SNAP.isPdf ? 'Reading the PDF…' : 'Reading receipt…')) + '</div>';
-  h += '<form class="form" data-form="snap">';
-  h += '<label class="field"><span>What is it?</span><select name="kind">' + FILE_KINDS.map((k) => opt(k, SNAP.kind)).join('') + '</select></label>';
-  h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(SNAP.date) + '"></label>' +
-    '<label class="field"><span>Total (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(SNAP.total) + '"></label></div>';
-  h += '<label class="field"><span>Store</span><input name="store" value="' + esc(SNAP.store) + '"></label>';
+  if (S.autoRead && kindGroup(SNAP.kind) === 'receipt') h += '<div class="muted" id="ocrmsg">' + esc(SNAP.ocrMsg || (SNAP.isPdf ? 'Reading the PDF…' : 'Reading receipt…')) + '</div>';
+  h += '<form class="form" data-form="snap">' + kindFields(SNAP.kind, SNAP);
   h += it ? '<button class="btn primary big" type="submit" name="dest" value="item">Save to ' + esc(it.name) + '</button>'
     : '<div class="btns"><button class="btn" type="submit" name="dest" value="inbox">Save to inbox</button><button class="btn primary" type="submit" name="dest" value="file">File to item</button></div>';
   if (SNAP.isPdf) h += '<button class="btn quiet" type="submit" name="dest" value="crop">Save, then crop a receipt out of it</button>';
@@ -902,8 +918,8 @@ function viewSettings() {
   h += '<section class="section"><div class="section-head"><h2>Properties</h2><button class="btn quiet" style="min-height:36px" data-act="propsheet" data-id="">Add</button></div><div class="card list">' +
     props.map((p) => '<button class="row" data-act="propsheet" data-id="' + esc(p.id) + '"><div class="grow"><div class="t">' + esc(p.name) + '</div><div class="s">' + esc(p.type + (p.address ? ' · ' + p.address : '')) + '</div></div></button>').join('') + '</div></section>';
   h += '<section class="section"><h2>Lists</h2><div class="card pad form">' +
-    [['categories', 'Categories'], ['locations', 'Locations'], ['warrantyTypes', 'Warranty types']].map((x) =>
-      '<label class="field"><span>' + x[1] + ' (one per line)</span><textarea id="list-' + x[0] + '" rows="5">' + esc(D.lists[x[0]].join('\n')) + '</textarea></label>').join('') +
+    [['people', 'People things belong to'], ['categories', 'Categories'], ['locations', 'Locations'], ['warrantyTypes', 'Warranty types']].map((x) =>
+      '<label class="field"><span>' + x[1] + ' (one per line)</span><textarea id="list-' + x[0] + '" rows="5">' + esc((x[0] === 'people' ? peopleList() : D.lists[x[0]]).join('\n')) + '</textarea></label>').join('') +
     '<button class="btn primary" data-act="savelists">Save lists</button></div></section>';
   h += '<section class="section"><h2>Reports</h2><div class="card pad form"><a class="btn" href="#/reports">Insurance inventory</a><div class="muted">Contents list by property and room, with values, as a PDF or spreadsheet.</div></div></section>';
   h += '<section class="section"><h2>Import</h2><div class="card pad form"><div class="muted">Bring in old receipts from Evernote, or share notes from OneNote.</div><a class="btn" href="#/import">Import from Evernote</a>' +
@@ -927,22 +943,29 @@ function fileSheet(id) {
   let h = sheetHead(f.kind || 'File');
   h += '<img class="preview" data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
   h += '<div class="btns"><button class="btn primary" data-act="viewfile" data-id="' + id + '">View</button>' +
-    (f.mime === 'image/jpeg' || isPdfFile(f) ? '<button class="btn quiet" data-act="readfile" data-id="' + id + '">Read receipt</button>' : '<button class="btn quiet" data-act="openfile" data-id="' + id + '">Open in other app</button>') + '</div>';
+    ((f.mime === 'image/jpeg' || isPdfFile(f)) && kindGroup(f.kind) === 'receipt' ? '<button class="btn quiet" data-act="readfile" data-id="' + id + '">Read receipt</button>' : '<button class="btn quiet" data-act="openfile" data-id="' + id + '">Open in other app</button>') + '</div>';
   if (isPdfFile(f)) h += '<button class="btn" data-act="viewfile" data-id="' + id + '">Crop a receipt out of this PDF</button>';
   if (f.note) h += '<details><summary class="muted">Shared note text' + (f.lifetime ? ' (mentions lifetime)' : '') + '</summary><div style="white-space:pre-line;font-size:13px;margin-top:6px">' + esc(f.note.slice(0, 2000)) + '</div></details>';
   const grp = groupFiles(f).length;
   if (!it && grp > 1) h += '<div class="muted">Shared together with ' + (grp - 1) + ' other file' + (grp > 2 ? 's' : '') + '. Filing this one files them all.</div>';
-  h += '<form class="form" data-form="file" data-id="' + id + '">' +
-    '<label class="field"><span>What is it?</span><select name="kind">' + FILE_KINDS.map((k) => opt(k, f.kind)).join('') + '</select></label>' +
-    '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(f.date || '') + '"></label>' +
-    '<label class="field"><span>Total (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(f.total || '') + '"></label></div>' +
-    '<label class="field"><span>Store</span><input name="store" value="' + esc(f.store || '') + '"></label>' +
-    '<button class="btn primary" type="submit">Save changes</button></form>';
+  h += '<form class="form" data-form="file" data-id="' + id + '">' + kindFields(f.kind, f) + '<button class="btn primary" type="submit">Save changes</button></form>';
   h += '<div class="muted">' + (it ? 'Filed to ' + esc(it.name) : 'In the inbox') + (f.uploaded ? ' · in Dropbox' : ' · waiting to upload') + '</div>';
   h += '<div class="btns"><button class="btn" data-act="picker" data-id="' + id + '">' + (it ? 'Move to another item' : 'File to item') + '</button>' +
     (it ? '<button class="btn quiet" data-act="unfile" data-id="' + id + '">Back to inbox</button>' : '<button class="btn quiet" data-act="newfromfile" data-id="' + id + '">New item from this</button>') + '</div>';
   h += '<button class="btn danger" data-act="delfile" data-id="' + id + '">Delete file</button>';
   openSheet(h);
+}
+/* The boxes a file needs depend on what it is: receipts get store, date and total; documents a date; photos nothing. */
+function kindFields(kind, v) {
+  const g = kindGroup(kind);
+  return '<label class="field"><span>What is it?</span><select name="kind" data-kindsel>' + FILE_KINDS.map((k) => opt(k, kind)).join('') + '</select></label>' +
+    '<div class="grid2" data-show="receipt doc"' + (g === 'photo' ? ' hidden' : '') + '><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(v.date || '') + '"></label>' +
+    '<label class="field" data-show="receipt"' + (g !== 'receipt' ? ' hidden' : '') + '><span>Total (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(v.total === undefined ? '' : v.total) + '"></label></div>' +
+    '<label class="field" data-show="receipt"' + (g !== 'receipt' ? ' hidden' : '') + '><span>Store</span><input name="store" value="' + esc(v.store || '') + '"></label>';
+}
+function applyKindFields(sel) {
+  const g = kindGroup(sel.value), form = sel.closest('form');
+  form.querySelectorAll('[data-show]').forEach((el) => { el.hidden = !el.dataset.show.split(' ').includes(g); });
 }
 function pickerList(fileId, q) {
   const s = (q || '').toLowerCase();
@@ -1803,7 +1826,7 @@ async function buildClaimPack(c, fileIds) {
   W.text(c.title, { size: 11, color: [0.42, 0.45, 0.5] });
   W.y -= 6;
   W.heading('Item');
-  W.kv([['Item', it.name], ['Brand', it.brand], ['Model', it.model], ['Serial number', it.serial], ['Category', it.category],
+  W.kv([['Item', it.name], ['Belongs to', it.owner], ['Brand', it.brand], ['Model', it.model], ['Serial number', it.serial], ['Category', it.category],
     ['Location', [p ? p.name + (p.address ? ', ' + p.address : '') : '', it.location, it.spot].filter(Boolean).join(' · ')],
     ['Bought from', it.store], ['Purchase date', fmtDate(it.purchaseDate)], ['Install date', fmtDate(it.installDate)], ['Price paid', fmtMoney(it.price)]]);
   const ws = itemWarranties(it.id);
@@ -1927,14 +1950,14 @@ async function buildInventoryPdf() {
 function csvCell(v) { const s = String(v == null ? '' : v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
 function toCsv(rows) { return '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n'); }
 function inventoryCsv() {
-  return toCsv([['Property', 'Property type', 'Address', 'Location', 'Exact spot', 'Item', 'Category', 'Brand', 'Model', 'Serial', 'Store', 'Purchase date', 'Price paid', 'Replacement value']]
-    .concat(inventoryRows().map((i) => { const p = propById(i.propertyId) || {}; return [p.name, p.type, p.address, i.location, i.spot, i.name, i.category, i.brand, i.model, i.serial, i.store, i.purchaseDate, i.price, i.replacementValue]; })));
+  return toCsv([['Property', 'Property type', 'Address', 'Location', 'Exact spot', 'Item', 'Belongs to', 'Category', 'Brand', 'Model', 'Serial', 'Store', 'Purchase date', 'Price paid', 'Replacement value']]
+    .concat(inventoryRows().map((i) => { const p = propById(i.propertyId) || {}; return [p.name, p.type, p.address, i.location, i.spot, i.name, i.owner, i.category, i.brand, i.model, i.serial, i.store, i.purchaseDate, i.price, i.replacementValue]; })));
 }
 function allCsv() {
-  const head = ['Item', 'Status', 'Archived', 'Property', 'Location', 'Category', 'Brand', 'Model', 'Serial', 'Store', 'Purchase date', 'Install date', 'Price paid', 'Replacement value', 'Work deduction', 'Warranty type', 'Covers', 'Term', 'Expiry', 'Warranty status', 'Provider'];
+  const head = ['Item', 'Belongs to', 'Status', 'Archived', 'Property', 'Location', 'Category', 'Brand', 'Model', 'Serial', 'Store', 'Purchase date', 'Install date', 'Price paid', 'Replacement value', 'Work deduction', 'Warranty type', 'Covers', 'Term', 'Expiry', 'Warranty status', 'Provider'];
   const out = [head];
   live('items').sort((a, b) => a.name.localeCompare(b.name)).forEach((i) => {
-    const base = [i.name, i.status || 'Active', i.archived ? 'Yes' : '', propName(i.propertyId), i.location, i.category, i.brand, i.model, i.serial, i.store, i.purchaseDate, i.installDate, i.price, i.replacementValue, i.work ? 'Yes' : ''];
+    const base = [i.name, i.owner, i.status || 'Active', i.archived ? 'Yes' : '', propName(i.propertyId), i.location, i.category, i.brand, i.model, i.serial, i.store, i.purchaseDate, i.installDate, i.price, i.replacementValue, i.work ? 'Yes' : ''];
     const ws = itemWarranties(i.id);
     if (!ws.length) out.push(base.concat(['', '', '', '', '', '']));
     ws.forEach((w) => { const s = warrantyStatus(w, i); out.push(base.concat([w.type, w.covers, w.termUnit === 'lifetime' ? 'Lifetime' : (w.termValue ? w.termValue + ' ' + w.termUnit : ''), s.expiry || '', s.label, w.provider])); });
@@ -1987,7 +2010,7 @@ async function buildFaultReport(c) {
     ['Next follow-up due', isOpenClaim(c) && c.followUp ? fmtDate(c.followUp) : ''],
     ['Outcome', c.resolution]]);
   W.heading('Item');
-  W.kv([['Item', it.name], ['Brand and model', [it.brand, it.model].filter(Boolean).join(' ')], ['Serial number', it.serial],
+  W.kv([['Item', it.name], ['Belongs to', it.owner], ['Brand and model', [it.brand, it.model].filter(Boolean).join(' ')], ['Serial number', it.serial],
     ['Location', [p ? p.name + (p.address ? ', ' + p.address : '') : '', it.location, it.spot].filter(Boolean).join(' · ')],
     ['Bought', [fmtDate(it.purchaseDate), it.store, fmtMoney(it.price)].filter(Boolean).join(' · ')], ['Warranty', wtxt]]);
   W.heading('What happened, in order');
@@ -2067,7 +2090,7 @@ window.addEventListener('hashchange', () => {
   const r = location.hash.split('/')[1] || '';
   if (r !== 'item' && r !== 'warranty' && r !== 'claim' && r !== 'claimform') ITEM_TAB = 'details';
   if (r !== 'snap') { SNAP = null; }
-  if (r !== 'snap') { SNAP_TARGET = null; CLAIM_TARGET = null; }
+  if (r !== 'snap') { SNAP_TARGET = null; CLAIM_TARGET = null; SNAP_TYPE = 'receipt'; }
   if (r !== 'new') { /* keep prefill only for the new-item screen */ if (lastRoute === 'new') NEW_ITEM_PREFILL = null; }
   lastRoute = r;
   closeSheet(); closeViewer(); render(); window.scrollTo(0, 0);
@@ -2138,12 +2161,19 @@ const ACT = {
   snapcancel() { const t = SNAP_TARGET; SNAP = null; SNAP_TARGET = null; go(t ? '#/item/' + t : '#/home'); },
   rot() { SNAP.quarter = (SNAP.quarter + 1) % 4; rebuildWork(); drawCropView(); },
   cropall() { SNAP.crop = { x: 0, y: 0, w: SNAP.work.width, h: SNAP.work.height }; placeCropRect(); },
-  docmode(el) { SNAP.docMode = !SNAP.docMode; el.setAttribute('aria-pressed', SNAP.docMode); },
+  docmode(el) { SNAP.docMode = !SNAP.docMode; el.setAttribute('aria-pressed', SNAP.docMode); el.textContent = SNAP.docMode ? 'Black and white' : 'Colour'; },
+  snaptype(el) { SNAP_TYPE = el.dataset.v; render(); },
+  async photosave(el) {
+    document.querySelectorAll('[data-act="photosave"]').forEach((b) => { b.disabled = true; });
+    el.textContent = 'Saving…';
+    SNAP.result = await finishImage(SNAP.work, SNAP.crop, SNAP.docMode);
+    await saveSnapFile(el.dataset.v);
+  },
   async cropnext(el) {
     el.disabled = true; el.textContent = 'Working…';
     SNAP.result = await finishImage(SNAP.work, SNAP.crop, SNAP.docMode);
     SNAP.step = 'details'; SNAP.ocrMsg = ''; render();
-    if (S.autoRead) {
+    if (S.autoRead && kindGroup(SNAP.kind) === 'receipt') {
       const mine = SNAP;
       readReceipt(SNAP.result.full).then((r) => {
         if (SNAP !== mine) return;
@@ -2202,7 +2232,7 @@ const ACT = {
   vext() { const f = VIEW && VIEW.f; closeViewer(); if (f) openFile(f); },
   vzoom(el) { if (!VIEW) return; VIEW.zoom = Math.min(3, Math.max(1, VIEW.zoom + (+el.dataset.v) * 0.5)); drawViewer(); },
   async vcrop(el) { el.disabled = true; el.textContent = 'Preparing page…'; try { await cropFromPdfPage(+el.dataset.v); } catch (e) { toast('Could not open that page: ' + e.message.slice(0, 80)); el.disabled = false; } },
-  gofilter(el) { ITEMS_F = Object.assign(ITEMS_F, { st: el.dataset.v, q: '', prop: 'all', cat: '', arch: false }); go('#/items'); },
+  gofilter(el) { ITEMS_F = Object.assign(ITEMS_F, { st: el.dataset.v, q: '', prop: 'all', cat: '', arch: false, owner: '' }); go('#/items'); },
   async faultreport(el) {
     const c = D.claims[el.dataset.id], it = D.items[c.itemId];
     el.disabled = true; const was = el.innerHTML; el.textContent = 'Making report…';
@@ -2222,7 +2252,7 @@ const ACT = {
     claimLogs(c.id).forEach((l) => { l.deleted = true; touch(l); });
     await saveData(); ITEM_TAB = 'log'; go('#/item/' + c.itemId);
   },
-  claimphoto(el) { const c = D.claims[el.dataset.id]; CLAIM_TARGET = c.id; SNAP_TARGET = c.itemId; go('#/snap'); },
+  claimphoto(el) { const c = D.claims[el.dataset.id]; CLAIM_TARGET = c.id; SNAP_TARGET = c.itemId; SNAP_TYPE = 'photo'; go('#/snap'); },
   packsheet(el) { packSheet(el.dataset.id); },
   svcsheet(el) { svcSheet(el.dataset.id, el.dataset.item); },
   async svcdone(el) {
@@ -2262,9 +2292,9 @@ const ACT = {
   },
   async savelists() {
     const read = (k) => Array.from(new Set($('#list-' + k).value.split('\n').map((s) => s.trim()).filter(Boolean)));
-    const c = read('categories'), l = read('locations'), w = read('warrantyTypes');
-    if (!c.length || !w.length) { toast('Categories and warranty types need at least one entry'); return; }
-    D.lists.categories = c; D.lists.locations = l; D.lists.warrantyTypes = w; D.lists.updatedAt = Date.now();
+    const c = read('categories'), l = read('locations'), w = read('warrantyTypes'), pp = read('people');
+    if (!c.length || !w.length || !pp.length) { toast('People, categories and warranty types need at least one entry'); return; }
+    D.lists.categories = c; D.lists.locations = l; D.lists.warrantyTypes = w; D.lists.people = pp; D.lists.updatedAt = Date.now();
     await saveData(); toast('Lists saved');
   },
   async export() {
@@ -2291,7 +2321,7 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.dataset && t.dataset.act === 'wifionly') { ACT.wifionly(t); return; }
-  if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) { const cl = CLAIM_TARGET; await startSnap(f, SNAP_TARGET); if (SNAP) { SNAP.claimId = cl; if (cl) SNAP.kind = 'Photo'; } } return; }
+  if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) { const cl = CLAIM_TARGET; await startSnap(f, SNAP_TARGET, cl ? 'photo' : SNAP_TYPE); if (SNAP) SNAP.claimId = cl; } return; }
   if (t.id === 'fcat') { ITEMS_F.cat = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'claimStatus') {
     const c = D.claims[t.dataset.id]; c.status = t.value;
@@ -2300,6 +2330,8 @@ document.addEventListener('change', async (e) => {
     if (isOpenClaim(c)) c.closed = '';
     touch(c); await saveData(); render(); toast('Status: ' + c.status); return;
   }
+  if (t.dataset && t.dataset.kindsel !== undefined) { applyKindFields(t); return; }
+  if (t.id === 'fowner') { ITEMS_F.owner = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'fst') { ITEMS_F.st = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'repProp') { REP.prop = t.value; render(); return; }
   if (t.id === 'repArch') { REP.arch = t.checked; render(); return; }
@@ -2356,28 +2388,14 @@ document.addEventListener('submit', async (e) => {
   } else if (kind === 'snap') {
     const dest = e.submitter ? e.submitter.value : 'inbox';
     SNAP.kind = v('kind'); SNAP.date = v('date'); SNAP.store = v('store'); SNAP.total = v('total');
-    const btns = form.querySelectorAll('button'); btns.forEach((b) => { b.disabled = true; });
-    const full = SNAP.isPdf ? SNAP.file : SNAP.result.full, thumb = SNAP.isPdf ? null : SNAP.result.thumb;
-    const f = touch({ id: uid(), itemId: SNAP.itemId || null, kind: SNAP.kind, date: SNAP.date, store: SNAP.store, total: SNAP.total === '' ? '' : +SNAP.total,
-      mime: SNAP.isPdf ? 'application/pdf' : 'image/jpeg', origName: SNAP.file.name || '', size: full.size, uploaded: false, path: null, createdAt: Date.now(),
-      groupId: SNAP.groupId || null, derivedFrom: SNAP.fromFile || null, claimId: SNAP.claimId || null });
-    await idb.put('blobs', f.id, full);
-    if (thumb) await idb.put('thumbs', f.id, thumb);
-    else if (SNAP.isPdf) { try { await idb.put('thumbs', f.id, await pdfThumbBlob(full)); } catch (err) { /* unreadable PDF */ } }
-    D.files[f.id] = f;
-    await saveData();
-    const target = f.itemId;
-    SNAP = null; SNAP_TARGET = null;
-    if (f.claimId && D.claims[f.claimId]) {
-      const l = touch({ id: uid(), itemId: f.itemId, claimId: f.claimId, date: f.date || todayISO(), kind: 'Note', ticket: '', contact: '', text: f.kind + ' added', fileIds: [f.id], createdAt: Date.now() });
-      D.logs[l.id] = l; await saveData(); go('#/claim/' + f.claimId); toast('Photo added to the claim');
-    } else if (dest === 'crop') { go(target ? '#/item/' + target : '#/inbox'); setTimeout(() => openViewer(f.id), 60); }
-    else if (target) { ITEM_TAB = 'files'; go('#/item/' + target); toast('Saved'); }
-    else if (dest === 'file') { go('#/inbox'); setTimeout(() => openPicker(f.id), 50); }
-    else { go('#/inbox'); toast('Saved to inbox'); }
+    form.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    await saveSnapFile(dest);
   } else if (kind === 'file') {
     const f = D.files[form.dataset.id];
-    f.kind = v('kind'); f.date = v('date'); f.store = v('store'); f.total = v('total') === '' ? '' : +v('total');
+    f.kind = v('kind');
+    const g = kindGroup(f.kind);
+    if (g !== 'photo') f.date = v('date');
+    f.store = g === 'receipt' ? v('store') : ''; f.total = g === 'receipt' && v('total') !== '' ? +v('total') : '';
     touch(f); await saveData(); closeSheet(); render(); toast('Saved');
   } else if (kind === 'draft') {
     const d = IMP.drafts[form.dataset.id], act = e.submitter ? e.submitter.value : 'accept';
@@ -2507,6 +2525,30 @@ ACT.impmerge = async (el) => {
   await saveImport(); await saveData(); closeSheet(); toast('Merged into ' + it.name); render();
 };
 
+/* Save whatever is on the Snap screen as a file, then go where the person asked. */
+async function saveSnapFile(dest) {
+  const g = kindGroup(SNAP.kind);
+  const full = SNAP.isPdf ? SNAP.file : SNAP.result.full, thumb = SNAP.isPdf ? null : SNAP.result.thumb;
+  const f = touch({ id: uid(), itemId: SNAP.itemId || null, kind: SNAP.kind, date: g === 'photo' ? todayISO() : SNAP.date,
+    store: g === 'receipt' ? SNAP.store : '', total: g === 'receipt' && SNAP.total !== '' ? +SNAP.total : '',
+    mime: SNAP.isPdf ? 'application/pdf' : 'image/jpeg', origName: SNAP.file.name || '', size: full.size, uploaded: false, path: null, createdAt: Date.now(),
+    groupId: SNAP.groupId || null, derivedFrom: SNAP.fromFile || null, claimId: SNAP.claimId || null });
+  await idb.put('blobs', f.id, full);
+  if (thumb) await idb.put('thumbs', f.id, thumb);
+  else if (SNAP.isPdf) { try { await idb.put('thumbs', f.id, await pdfThumbBlob(full)); } catch (err) { /* unreadable PDF */ } }
+  D.files[f.id] = f;
+  await saveData();
+  const target = f.itemId;
+  SNAP = null; SNAP_TARGET = null;
+  if (f.claimId && D.claims[f.claimId]) {
+    const l = touch({ id: uid(), itemId: f.itemId, claimId: f.claimId, date: todayISO(), kind: 'Note', ticket: '', contact: '', text: f.kind + ' added', fileIds: [f.id], createdAt: Date.now() });
+    D.logs[l.id] = l; await saveData(); go('#/claim/' + f.claimId); toast('Photo added to the claim');
+  } else if (dest === 'crop') { go(target ? '#/item/' + target : '#/inbox'); setTimeout(() => openViewer(f.id), 60); }
+  else if (target) { ITEM_TAB = 'files'; go('#/item/' + target); toast(g === 'photo' ? 'Photo saved' : 'Saved'); }
+  else if (dest === 'file') { go('#/inbox'); setTimeout(() => openPicker(f.id), 50); }
+  else { go('#/inbox'); toast('Saved to inbox'); }
+}
+
 /* PDF picked on the Snap screen: show its first page and read its text. */
 async function snapPdfDetails() {
   const mine = SNAP;
@@ -2514,7 +2556,7 @@ async function snapPdfDetails() {
     const t = await pdfThumbBlob(mine.file);
     if (SNAP === mine) { const im = $('#snapprev'); if (im) im.src = URL.createObjectURL(t); }
   } catch (e) { const im = $('#snapprev'); if (im) im.remove(); }
-  if (!S.autoRead || mine.pdfRead) return;
+  if (!S.autoRead || mine.pdfRead || kindGroup(mine.kind) !== 'receipt') return;
   mine.pdfRead = true;
   try {
     const r = await readPdf(mine.file);
