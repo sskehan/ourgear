@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.03';
+const APP_VERSION = '1.04';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Shared'];
@@ -578,17 +578,21 @@ function go(hash) { if (location.hash === hash) render(); else location.hash = h
 function groupBy(arr, key) { const o = {}; arr.forEach((x) => { (o[x[key]] = o[x[key]] || []).push(x); }); return o; }
 function badge(st) { return '<span class="badge b-' + st.kind + '">' + esc(st.label) + '</span>'; }
 function opt(v, cur, label) { return '<option value="' + esc(v) + '"' + (String(v) === String(cur == null ? '' : cur) ? ' selected' : '') + '>' + esc(label == null ? v : label) + '</option>'; }
+const SV = (paths, size) => '<svg width="' + (size || 22) + '" height="' + (size || 22) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
 const I = {
-  back: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>',
-  home: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 11l8-7 8 7v9H4z"/></svg>',
-  list: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>',
-  cam: '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
-  inbox: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><path d="M4 13l3-8h10l3 8v6H4z"/><path d="M4 13h5l1 2h4l1-2h5"/></svg>',
-  gear: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
-  plus: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
-  search: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>',
-  claim: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><path d="M9 11h6M9 15h4"/></svg>',
-  sync: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>'
+  back: SV('<path d="M15 6l-6 6l6 6"/>', 24),
+  home: SV('<path d="M5 12l-2 0l9 -9l9 9l-2 0"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7"/><path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/>'),
+  list: SV('<path d="M12 3l8 4.5v9l-8 4.5l-8 -4.5v-9l8 -4.5"/><path d="M12 12l8 -4.5"/><path d="M12 12v9"/><path d="M12 12l-8 -4.5"/>'),
+  cam: SV('<path d="M5 7h1a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1a2 2 0 0 0 2 2h1a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2"/><circle cx="12" cy="13" r="3"/>', 24),
+  inbox: SV('<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 13h3l3 3h4l3 -3h3"/>'),
+  claim: SV('<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/><path d="M12 11v3"/><path d="M12 17h.01"/>'),
+  gear: SV('<path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"/><circle cx="12" cy="12" r="3"/>'),
+  plus: SV('<path d="M12 5v14"/><path d="M5 12h14"/>'),
+  search: SV('<circle cx="10" cy="10" r="7"/><path d="M21 21l-6 -6"/>', 18),
+  sync: SV('<path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"/>', 20),
+  doc: SV('<path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"/><path d="M9 9h1"/><path d="M9 13h6"/><path d="M9 17h6"/>', 20),
+  phone: SV('<path d="M5 4h4l2 5l-2.5 1.5a11 11 0 0 0 5 5l1.5 -2.5l5 2v4a2 2 0 0 1 -2 2a16 16 0 0 1 -15 -15a2 2 0 0 1 2 -2"/>', 16),
+  clock: SV('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>', 16)
 };
 function logoSVG(size) {
   const fg = 'fill:var(--logo-fg)', st = 'fill:none;stroke:var(--logo-fg);stroke-linecap:round;stroke-linejoin:round', kn = 'fill:var(--hdr-bg)';
@@ -626,7 +630,8 @@ function syncButton() {
 }
 
 /* ---------- views ---------- */
-let ITEMS_F = { q: '', prop: 'all', cat: '', arch: false };
+let ITEMS_F = { q: '', prop: 'all', cat: '', arch: false, st: 'all' };
+const ST_FILTERS = [['all', 'Any warranty'], ['soon', 'Expiring soon'], ['ok', 'Covered'], ['life', 'Lifetime'], ['gone', 'Expired'], ['nowar', 'No warranty']];
 let ITEM_TAB = 'details';
 let SNAP_TARGET = null;
 
@@ -647,9 +652,9 @@ function viewHome() {
   h += '<a class="btn primary big" href="#/snap">' + I.cam + 'Snap a receipt</a>';
   h += '<div class="stats">' +
     '<a class="stat" href="#/inbox"><div class="l">Inbox to file</div><div class="n">' + inbox + '</div></a>' +
-    '<a class="stat" href="#/items"><div class="l">Expiring in 90 days</div><div class="n" style="color:#8A5A00">' + soon.length + '</div></a>' +
+    '<button class="stat" data-act="gofilter" data-v="soon"><div class="l">Expiring in 90 days</div><div class="n" style="color:#8A5A00">' + soon.length + '</div></button>' +
     '<a class="stat" href="#/claims"><div class="l">Open claims</div><div class="n">' + openClaims().length + '</div></a>' +
-    '<a class="stat" href="#/items"><div class="l">Service due</div><div class="n">' + servicesDue().length + '</div></a></div>';
+    '<a class="stat" href="#/service"><div class="l">Service due</div><div class="n">' + servicesDue().length + '</div></a></div>';
   h += '<section class="section"><div class="section-head"><h2>Expiring soon</h2></div>';
   if (soon.length) {
     h += '<div class="card list">' + soon.slice(0, 6).map((x) =>
@@ -657,6 +662,9 @@ function viewHome() {
       esc((x.w.type || 'Warranty') + (x.w.covers ? ' (' + x.w.covers + ')' : '') + ' · ends ' + fmtDate(x.s.expiry)) + '</div></div>' + badge(x.s) + '</a>').join('') + '</div>';
   } else h += '<div class="card empty">Nothing expiring in the next 90 days.</div>';
   h += '</section>';
+  const fd = followUpsDue();
+  if (fd.length) h += '<section class="section"><h2>Follow up</h2><div class="card list">' + fd.map((x) =>
+    '<a class="row" href="#/claim/' + x.c.id + '"><div class="grow"><div class="t">' + esc(x.c.title) + '</div><div class="s">' + esc(D.items[x.c.itemId].name + (x.c.provider ? ' · ' + x.c.provider : '') + (x.c.ticket ? ' · Ticket ' + x.c.ticket : '')) + '</div></div>' + badge(x.f) + '</a>').join('') + '</div></section>';
   const oc = openClaims();
   if (oc.length) h += '<section class="section"><div class="section-head"><h2>Open claims</h2><a href="#/claims">See all</a></div><div class="card list">' + oc.slice(0, 3).map((c) => claimRow(c, true)).join('') + '</div></section>';
   const sd = servicesDue();
@@ -679,7 +687,9 @@ function filteredItems() {
     (ITEMS_F.prop === 'all' || i.propertyId === ITEMS_F.prop) && (!ITEMS_F.cat || i.category === ITEMS_F.cat) &&
     (!q || [i.name, i.brand, i.model, i.serial, i.store, i.notes, i.location, i.spot].some((v) => v && String(v).toLowerCase().includes(q))))
     .sort((a, b) => a.name.localeCompare(b.name))
-    .map((i) => ({ i, st: i.archived ? { kind: 'arch', label: 'Archived' } : itemStatus(i, byItem[i.id] || []) }));
+    .map((i) => ({ i, st: i.archived ? { kind: 'arch', label: 'Archived' } : itemStatus(i, byItem[i.id] || []), all: (byItem[i.id] || []).map((w) => warrantyStatus(w, i).kind) }))
+    .filter((r) => ITEMS_F.st === 'all' || (ITEMS_F.st === 'nowar' ? !r.all.length : ITEMS_F.st === 'ok' ? r.st.kind === 'ok' : r.all.includes(ITEMS_F.st)))
+    .sort((a, b) => ITEMS_F.st === 'soon' ? (a.st.days || 0) - (b.st.days || 0) : 0);
 }
 function itemsListHTML() {
   const rows = filteredItems();
@@ -697,7 +707,8 @@ function viewItems() {
   h += '<div class="chips">' + '<button class="chip" data-act="fprop" data-v="all" aria-pressed="' + (ITEMS_F.prop === 'all') + '">All</button>' +
     props.map((p) => '<button class="chip" data-act="fprop" data-v="' + esc(p.id) + '" aria-pressed="' + (ITEMS_F.prop === p.id) + '">' + esc(p.name) + '</button>').join('') +
     '<button class="chip" data-act="farch" aria-pressed="' + ITEMS_F.arch + '">Include archived</button></div>';
-  h += '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label>';
+  h += '<div class="grid2"><label class="field"><span>Warranty</span><select id="fst">' + ST_FILTERS.map(([k, l]) => opt(k, ITEMS_F.st, l)).join('') + '</select></label>' +
+    '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label></div>';
   h += '<div class="muted" id="itemcount"></div><div id="itemlist">' + itemsListHTML() + '</div></main>';
   return h + nav('items');
 }
@@ -707,7 +718,7 @@ function viewItem(id) {
   if (!it || it.deleted) return header('Not found', { back: '#/items' }) + '<main><div class="card empty">This item was deleted.</div></main>' + nav('items');
   const p = propById(it.propertyId);
   const tabs = '<div class="tabs" role="tablist">' + ['details', 'warranties', 'files', 'log'].map((t) =>
-    '<button role="tab" data-act="tab" data-v="' + t + '" aria-selected="' + (ITEM_TAB === t) + '">' + t[0].toUpperCase() + t.slice(1) + '</button>').join('') + '</div>';
+    '<button role="tab" data-act="tab" data-v="' + t + '" aria-selected="' + (ITEM_TAB === t) + '">' + { details: 'Details', warranties: 'Warranty', files: 'Files', log: 'Claims' }[t] + '</button>').join('') + '</div>';
   let h = header(it.name, { back: '#/items', sub: [it.brand, it.model].filter(Boolean).join(' ') + (it.brand || it.model ? ' · ' : '') + propName(it.propertyId) + (it.location ? ', ' + it.location : ''), extra: tabs });
   h += '<main>';
   if (it.archived) h += '<div class="note">Archived. Files are in the Dropbox archive folder and still searchable. <button class="btn quiet" style="margin-top:8px;width:100%" data-act="restore" data-id="' + id + '">Restore</button></div>';
@@ -1428,7 +1439,34 @@ async function cropFromPdfPage(n) {
 }
 /* ---------- v1.03: claims and fault log, service jobs, Send to Our Tax ---------- */
 const CLAIM_STATUS = ['Open', 'Waiting', 'Resolved', 'Rejected'];
-const LOG_KINDS = ['Fault', 'Phone call', 'Email', 'Visit', 'Repair', 'Replacement', 'Service', 'Note'];
+const CONTACT_KINDS = ['Phone call', 'Email', 'Online form', 'Live chat', 'In person', 'Letter'];
+const LOG_KINDS = CONTACT_KINDS.concat(['Technician visit', 'Repair', 'Replacement', 'Service', 'Note']);
+const DIRECTIONS = [['out', 'You contacted them'], ['in', 'They contacted you'], ['', 'Not a contact (a note)']];
+function isContact(l) { return CONTACT_KINDS.includes(l.kind) || l.kind === 'Visit'; }
+function daysBetween(a, b) { const x = parseISO(a), y = parseISO(b); return x && y ? Math.round((Date.UTC(y.y, y.m - 1, y.d) - Date.UTC(x.y, x.m - 1, x.d)) / 864e5) : null; }
+/* Plain-English summary of a claim: when and how it was reported, follow-ups, replies, gaps. */
+function claimStats(c) {
+  const logs = claimLogs(c.id).slice().reverse();
+  const first = logs.find((l) => l.first) || logs[0] || null;
+  const reported = c.opened || (first && first.date) || '';
+  const end = isOpenClaim(c) ? todayISO() : (c.closed || todayISO());
+  const later = logs.filter((l) => l !== first);
+  const out = later.filter((l) => l.direction === 'out' || (!l.direction && isContact(l)));
+  const inn = later.filter((l) => l.direction === 'in');
+  const contacts = logs.filter((l) => l.first || l.direction === 'in' || l.direction === 'out');
+  const last = contacts[contacts.length - 1] || null;
+  let longestGap = 0;
+  for (let i = 1; i < logs.length; i++) longestGap = Math.max(longestGap, daysBetween(logs[i - 1].date, logs[i].date) || 0);
+  if (isOpenClaim(c) && logs.length) longestGap = Math.max(longestGap, daysBetween(logs[logs.length - 1].date, todayISO()) || 0);
+  return { logs, first, reported, how: first && first.first ? first.kind : '', days: daysBetween(reported, end), followUps: out.length, replies: inn.length, last, longestGap };
+}
+function followUpStatus(c) {
+  if (!c.followUp || !isOpenClaim(c)) return null;
+  const d = daysUntil(c.followUp);
+  return { kind: d < 0 ? 'gone' : d <= 2 ? 'soon' : 'life', label: d < 0 ? 'Follow up overdue' : d === 0 ? 'Follow up today' : 'Follow up ' + fmtDate(c.followUp), days: d };
+}
+function followUpsDue() { return openClaims().map((c) => ({ c, f: followUpStatus(c) })).filter((x) => x.f && x.f.days <= 2).sort((a, b) => a.f.days - b.f.days); }
+function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
 const OURTAX_URL = 'https://sskehan.github.io/ourtax/';
 function claimBadge(c) { return { kind: { Open: 'soon', Waiting: 'life', Resolved: 'ok', Rejected: 'gone' }[c.status] || 'none', label: c.status || 'Open' }; }
 function isOpenClaim(c) { return c.status === 'Open' || c.status === 'Waiting'; }
@@ -1459,7 +1497,7 @@ function claimRow(c, showItem) {
   const it = D.items[c.itemId], last = claimLogs(c.id)[0];
   return '<a class="row" href="#/claim/' + c.id + '"><div class="grow"><div class="t">' + esc(c.title) + '</div><div class="s">' +
     esc([showItem && it ? it.name : '', c.ticket ? 'Ticket ' + c.ticket : '', last ? 'Last entry ' + fmtDate(last.date) : 'Opened ' + fmtDate(c.opened)].filter(Boolean).join(' · ')) +
-    '</div></div>' + badge(claimBadge(c)) + '</a>';
+    '</div></div>' + badge(followUpStatus(c) && followUpStatus(c).days <= 2 ? followUpStatus(c) : claimBadge(c)) + '</a>';
 }
 function viewClaims() {
   const all = live('claims').filter((c) => liveItem(c.itemId));
@@ -1475,9 +1513,12 @@ function viewClaims() {
 function entryHTML(l, showClaim) {
   const c = l.claimId && D.claims[l.claimId];
   const files = (l.fileIds || []).map((id) => D.files[id]).filter((f) => f && !f.deleted);
-  return '<button class="entry" data-act="logsheet" data-id="' + l.id + '"><div class="entry-head"><span class="t">' + esc(l.kind) + '</span><span class="muted">' + esc(fmtDate(l.date)) + '</span></div>' +
+  const who = c && !c.deleted ? (c.provider || 'them') : 'them';
+  const dir = l.first ? 'Fault reported' + (isContact(l) ? ' to ' + who : '') : l.direction === 'in' ? who + ' contacted you' : l.direction === 'out' ? 'You contacted ' + who : '';
+  return '<button class="entry' + (l.direction === 'in' ? ' entry-in' : '') + '" data-act="logsheet" data-id="' + l.id + '"><div class="entry-head"><span class="t">' + esc(l.kind) + '</span><span class="muted">' + esc(fmtDate(l.date)) + '</span></div>' +
+    (dir ? '<div class="entry-dir">' + esc(dir) + '</div>' : '') +
     (showClaim && c && !c.deleted ? '<div class="muted">Claim: ' + esc(c.title) + '</div>' : '') +
-    (l.ticket || l.contact ? '<div class="muted">' + esc([l.ticket ? 'Ticket ' + l.ticket : '', l.contact].filter(Boolean).join(' · ')) + '</div>' : '') +
+    (l.ticket || l.contact ? '<div class="muted">' + esc([l.ticket ? 'Ticket ' + l.ticket : '', l.contact ? 'Spoke with ' + l.contact : ''].filter(Boolean).join(' · ')) + '</div>' : '') +
     (l.text ? '<div style="white-space:pre-line">' + esc(l.text) + '</div>' : '') +
     (files.length ? '<div class="entry-files">' + files.map((f) => '<img data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">').join('') + '</div>' : '') + '</button>';
 }
@@ -1488,16 +1529,25 @@ function viewClaim(id) {
   const logs = claimLogs(id);
   let h = header(c.title, { back: '#/item/' + it.id, sub: it.name });
   h += '<main>';
-  h += '<div class="card pad form"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><label class="field" style="flex:1"><span>Status</span><select id="claimStatus" data-id="' + id + '">' +
-    CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label>' + badge(claimBadge(c)) + '</div>';
+  const st = claimStats(c), fu = followUpStatus(c);
+  h += '<div class="card pad summary"><div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span class="t" style="font-weight:700">At a glance</span>' + badge(claimBadge(c)) + '</div><ul>' +
+    '<li>Reported ' + esc(fmtDate(st.reported)) + (st.how ? ' by ' + esc(st.how.toLowerCase()) : '') + (c.provider ? ' to ' + esc(c.provider) : '') + '</li>' +
+    '<li>' + (isOpenClaim(c) ? 'Open for ' : 'Took ') + esc(plural(st.days || 0, 'day')) + '</li>' +
+    '<li>You followed up ' + esc(plural(st.followUps, 'time')) + ' · they contacted you ' + esc(plural(st.replies, 'time')) + '</li>' +
+    (st.last ? '<li>Last contact ' + esc(fmtDate(st.last.date)) + ' (' + esc(st.last.kind.toLowerCase()) + ')</li>' : '') +
+    (st.longestGap >= 7 ? '<li>Longest wait with no contact: ' + esc(plural(st.longestGap, 'day')) + '</li>' : '') + '</ul>' +
+    (fu ? badge(fu) : '') + '</div>';
+  h += '<button class="btn primary big" data-act="logsheet" data-id="" data-item="' + it.id + '" data-claim="' + id + '">' + I.plus + 'Add an update</button>';
+  h += '<div class="btns"><button class="btn" data-act="faultreport" data-id="' + id + '">' + I.doc + 'Fault report</button><button class="btn" data-act="packsheet" data-id="' + id + '">' + I.doc + 'Claim pack</button></div>';
+  h += '<div class="muted">Fault report: the history of the fault on one page or two. Claim pack: the same plus receipts, invoices and photos, ready to send.</div>';
+  h += '<button class="btn quiet" data-act="claimphoto" data-id="' + id + '">Add a photo of the fault</button>';
+  h += '<section class="section"><h2>Claim details</h2><div class="card pad form"><label class="field"><span>Status</span><select id="claimStatus" data-id="' + id + '">' +
+    CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label>';
   const kv = [['Opened', fmtDate(c.opened)], ['Ticket', c.ticket], ['Claim with', c.provider], ['Contact', c.contact],
     ['Warranty', w ? (w.type || 'Warranty') + (w.covers ? ' (' + w.covers + ')' : '') + ' · ' + warrantyStatus(w, it).label : ''],
     ['Closed', fmtDate(c.closed)], ['Outcome', c.resolution]].filter((r) => r[1]);
   h += '<div class="kv" style="margin:0 -14px">' + kv.map((r) => '<div>' + esc(r[0]) + '</div><div style="white-space:pre-line">' + esc(r[1]) + '</div>').join('') + '</div>';
-  h += '<a class="btn quiet" href="#/claimform/' + it.id + '/' + id + '">Edit claim details</a></div>';
-  h += '<button class="btn primary big" data-act="packsheet" data-id="' + id + '">Make claim pack</button>';
-  h += '<div class="btns"><button class="btn" data-act="logsheet" data-id="" data-item="' + it.id + '" data-claim="' + id + '">Add entry</button>' +
-    '<button class="btn" data-act="claimphoto" data-id="' + id + '">Add photo</button></div>';
+  h += '<a class="btn quiet" href="#/claimform/' + it.id + '/' + id + '">Edit claim details</a></div></section>';
   h += '<section class="section"><h2>Timeline</h2>' + (logs.length ? '<div class="timeline">' + logs.map((l) => entryHTML(l, false)).join('') + '</div>' : '<div class="card empty">No entries yet.</div>') + '</section>';
   h += '<button class="btn danger" data-act="delclaim" data-id="' + id + '">Delete claim</button>';
   return h + '</main>' + nav('claims');
@@ -1512,42 +1562,54 @@ function viewClaimForm(itemId, cid) {
   const best = isNew ? (ws.map((w) => ({ w, s: warrantyStatus(w, it) })).filter((x) => ['ok', 'soon', 'life'].includes(x.s.kind))[0] || {}).w : null;
   let h = header(isNew ? 'Log a fault' : 'Edit claim', { back: isNew ? '#/item/' + itemId : '#/claim/' + cid, sub: it.name });
   h += '<main><form class="form" data-form="claim" data-item="' + itemId + '" data-id="' + esc(isNew ? '' : cid) + '">';
-  h += '<label class="field req"><span>What\'s wrong?</span><input name="title" required value="' + esc(c.title) + '" placeholder="Not cooling, error E5"></label>';
-  h += '<div class="grid2"><label class="field"><span>Date</span><input name="opened" type="date" value="' + esc(c.opened || '') + '"></label>' +
-    '<label class="field"><span>Status</span><select name="status">' + CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label></div>';
-  h += '<label class="field"><span>Warranty</span><select name="warrantyId">' + opt('', isNew ? (best ? best.id : '') : c.warrantyId, 'None or not sure') +
+  const wsel = '<label class="field"><span>Warranty it\'s claimed under</span><select name="warrantyId">' + opt('', isNew ? (best ? best.id : '') : c.warrantyId, 'None or not sure') +
     ws.map((w) => opt(w.id, isNew ? (best ? best.id : '') : c.warrantyId, (w.type || 'Warranty') + (w.covers ? ' (' + w.covers + ')' : '') + ' · ' + warrantyStatus(w, it).label)).join('') + '</select></label>';
-  h += '<div class="grid2"><label class="field"><span>Claim with</span><input name="provider" value="' + esc(c.provider || (best && best.provider) || it.store || '') + '" placeholder="Maker or store"></label>' +
+  h += '<label class="field req"><span>What\'s wrong?</span><input name="title" required value="' + esc(c.title) + '" placeholder="Not cooling, error E5"></label>';
+  if (isNew) {
+    h += '<div class="grid2"><label class="field"><span>Date reported</span><input name="opened" type="date" value="' + esc(c.opened || '') + '"></label>' +
+      '<label class="field"><span>How did you report it?</span><select name="how">' + CONTACT_KINDS.map((k) => opt(k, 'Phone call')).join('') + opt('Note', '', 'Not reported yet') + '</select></label></div>';
+    h += '<input type="hidden" name="status" value="Open">';
+  } else {
+    h += '<div class="grid2"><label class="field"><span>Date reported</span><input name="opened" type="date" value="' + esc(c.opened || '') + '"></label>' +
+      '<label class="field"><span>Status</span><select name="status">' + CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label></div>';
+  }
+  h += '<div class="grid2"><label class="field"><span>Reported to</span><input name="provider" value="' + esc(c.provider || (best && best.provider) || it.store || '') + '" placeholder="Maker or store"></label>' +
     '<label class="field"><span>Ticket or reference</span><input name="ticket" value="' + esc(c.ticket || '') + '"></label></div>';
-  h += '<label class="field"><span>Contact</span><input name="contact" value="' + esc(c.contact || (best && best.contact) || '') + '" placeholder="Name, phone or email"></label>';
-  if (isNew) h += '<label class="field"><span>What happened</span><textarea name="text" placeholder="When it started, what you tried, error codes"></textarea></label>';
+  h += '<label class="field"><span>Their phone, email or contact person</span><input name="contact" value="' + esc(c.contact || (best && best.contact) || '') + '"></label>';
+  h += wsel;
+  if (isNew) h += '<label class="field"><span>What happened</span><textarea name="text" placeholder="When it started, what you tried, error codes, what they said"></textarea></label>' +
+    '<label class="field"><span>Follow up by (optional)</span><input name="followUp" type="date"></label>';
   else h += '<div class="grid2"><label class="field"><span>Closed</span><input name="closed" type="date" value="' + esc(c.closed || '') + '"></label><span></span></div>' +
     '<label class="field"><span>Outcome</span><textarea name="resolution" placeholder="Repaired, replaced, refunded…">' + esc(c.resolution || '') + '</textarea></label>';
   h += '<button class="btn primary big" type="submit">' + (isNew ? 'Start claim' : 'Save') + '</button></form></main>';
   return h + nav('claims');
 }
 function logSheet(id, itemId, claimId) {
-  const l = id ? D.logs[id] : { date: todayISO(), kind: claimId ? 'Phone call' : 'Note', fileIds: [] };
+  const l = id ? D.logs[id] : { date: todayISO(), kind: claimId ? 'Phone call' : 'Note', fileIds: [], direction: claimId ? 'out' : '' };
   if (!l) return;
   const iid = id ? l.itemId : itemId;
   const fs = itemFiles(iid).filter((f) => f.kind !== 'Claim pack');
-  let h = sheetHead(id ? 'Edit entry' : 'Add entry') + '<form class="form" data-form="log" data-id="' + esc(id || '') + '" data-item="' + esc(iid) + '" data-claim="' + esc(id ? (l.claimId || '') : (claimId || '')) + '">';
+  let h = sheetHead(id ? 'Edit update' : 'Add an update') + '<form class="form" data-form="log" data-id="' + esc(id || '') + '" data-item="' + esc(iid) + '" data-claim="' + esc(id ? (l.claimId || '') : (claimId || '')) + '">';
+  const cl = (id ? l.claimId : claimId) && D.claims[id ? l.claimId : claimId];
   h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(l.date || '') + '"></label>' +
     '<label class="field"><span>Type</span><select name="kind">' + LOG_KINDS.map((k) => opt(k, l.kind)).join('') + '</select></label></div>';
-  h += '<div class="grid2"><label class="field"><span>Ticket or reference</span><input name="ticket" value="' + esc(l.ticket || '') + '"></label>' +
-    '<label class="field"><span>Contact</span><input name="contact" value="' + esc(l.contact || '') + '"></label></div>';
-  h += '<label class="field"><span>What happened</span><textarea name="text">' + esc(l.text || '') + '</textarea></label>';
+  if (!l.first) h += '<label class="field"><span>Who made contact?</span><select name="direction">' + DIRECTIONS.map(([k, t]) => opt(k, id ? (l.direction || '') : (claimId ? 'out' : ''), t)).join('') + '</select></label>';
+  h += '<label class="field"><span>What happened</span><textarea name="text" placeholder="What was said or done, any promises made">' + esc(l.text || '') + '</textarea></label>';
+  h += '<div class="grid2"><label class="field"><span>Person you dealt with</span><input name="contact" value="' + esc(l.contact || '') + '"></label>' +
+    '<label class="field"><span>Ticket or reference</span><input name="ticket" value="' + esc(l.ticket || '') + '"></label></div>';
+  if (cl) h += '<label class="field"><span>Follow up by</span><input name="followUp" type="date" value="' + esc(cl.followUp || '') + '"></label><div class="muted">Leave blank if nothing is due. It shows on Home when it\'s close.</div>';
   if (fs.length) h += '<div class="field"><span>Attach files from this item</span></div><div class="pickfiles">' + fs.map((f) =>
     '<label><input type="checkbox" name="file" value="' + f.id + '"' + ((l.fileIds || []).includes(f.id) ? ' checked' : '') + '><img data-thumb="' + f.id + '" alt=""><span>' + esc(f.kind) + '</span></label>').join('') + '</div>';
-  h += '<button class="btn primary" type="submit">Save entry</button>';
-  if (id) h += '<button class="btn danger" type="button" data-act="dellog" data-id="' + id + '">Delete entry</button>';
+  h += '<button class="btn primary" type="submit">Save update</button>';
+  if (id) h += '<button class="btn danger" type="button" data-act="dellog" data-id="' + id + '">Delete update</button>';
   openSheet(h + '</form>');
 }
 function itemLogTab(it) {
   const cs = itemClaims(it.id), logs = itemLogs(it.id);
   let h = '<section class="section"><div class="section-head"><h2>Claims</h2></div>' +
     (cs.length ? '<div class="card list">' + cs.map((c) => claimRow(c, false)).join('') + '</div>' : '<div class="card empty">No claims for this item.</div>') + '</section>';
-  h += '<div class="btns"><a class="btn primary" href="#/claimform/' + it.id + '/new">Log a fault</a><button class="btn" data-act="logsheet" data-id="" data-item="' + it.id + '" data-claim="">Add note</button></div>';
+  h += '<div class="btns"><a class="btn primary" href="#/claimform/' + it.id + '/new">Log a fault</a><button class="btn" data-act="logsheet" data-id="" data-item="' + it.id + '" data-claim="">Add a note</button></div>';
+  h += '<div class="muted">Log a fault starts a claim with its own timeline. Notes are for anything else about this item.</div>';
   h += '<section class="section"><h2>History</h2>' + (logs.length ? '<div class="timeline">' + logs.map((l) => entryHTML(l, true)).join('') + '</div>' : '<div class="card empty">Nothing logged yet.</div>') + '</section>';
   return h;
 }
@@ -1591,6 +1653,18 @@ function ourTaxHTML(it) {
   return '<div class="card pad form"><div class="t" style="font-weight:700">Work deduction</div>' +
     (it.sentToTax ? '<div class="muted">Sent to Our Tax on ' + esc(fmtDate(it.sentToTax)) + '.</div>' : '<div class="muted">Not sent to Our Tax yet.</div>') +
     '<button class="btn' + (it.sentToTax ? ' quiet' : ' primary') + '" data-act="sendtax" data-id="' + it.id + '">' + (it.sentToTax ? 'Send again' : 'Send to Our Tax') + '</button></div>';
+}
+
+function viewService() {
+  const all = live('services').filter((s) => { const it = liveItem(s.itemId); return it && !it.archived; })
+    .map((s) => ({ s, st: serviceStatus(s), it: D.items[s.itemId] })).sort((a, b) => (a.st.days == null ? 9e9 : a.st.days) - (b.st.days == null ? 9e9 : b.st.days));
+  let h = header('Service jobs', { back: '#/home', sub: all.length ? plural(servicesDue().length, 'job') + ' due' : '' });
+  h += '<main>';
+  if (!all.length) h += '<div class="card empty">No service jobs yet. Open an item and use Add under Service jobs, for example "Clean air con filters, every 3 months".</div>';
+  else h += '<div class="card list">' + all.map((x) => '<div class="row" style="cursor:default"><a class="grow" href="#/item/' + x.it.id + '" style="text-decoration:none;color:inherit"><div class="t">' + esc(x.s.job) + '</div><div class="s">' +
+    esc(x.it.name + ' · every ' + plural(+x.s.everyMonths, 'month') + (x.s.lastDone ? ' · last done ' + fmtDate(x.s.lastDone) : '')) + '</div><div style="margin-top:4px">' + badge(x.st) + '</div></a>' +
+    '<button class="btn quiet" style="min-height:40px;padding:0 12px" data-act="svcdone" data-id="' + x.s.id + '">Done</button></div>').join('') + '</div>';
+  return h + '</main>' + nav('home');
 }
 /* ---------- v1.03: claim pack PDF, insurance inventory, CSV ---------- */
 async function getPdfLib() { if (typeof PDFLib === 'undefined') await loadScript('pdf-lib.min.js'); return PDFLib; }
@@ -1886,6 +1960,75 @@ function saveReady() {
   const a = document.createElement('a'); a.href = URL.createObjectURL(READY.blob); a.download = READY.name;
   document.body.appendChild(a); a.click(); a.remove(); toast('Saved to Downloads');
 }
+
+/* ---------- v1.04: fault report (the history of a fault, for complaints and escalations) ---------- */
+async function buildFaultReport(c) {
+  const it = D.items[c.itemId], p = propById(it.propertyId), st = claimStats(c), lib = (await getPdfLib());
+  const W = await newPdf();
+  const grey = [0.42, 0.45, 0.5];
+  W.text('Fault report', { size: 20, bold: true, color: [0.31, 0.27, 0.9] });
+  W.text(c.title, { size: 14, bold: true });
+  W.text(it.name + (it.brand || it.model ? ' · ' + [it.brand, it.model].filter(Boolean).join(' ') : '') + ' · Status: ' + c.status, { size: 10.5, color: grey });
+  W.y -= 6;
+  W.heading('Summary');
+  const w = c.warrantyId && D.warranties[c.warrantyId] && !D.warranties[c.warrantyId].deleted ? D.warranties[c.warrantyId] : null;
+  let wtxt = '';
+  if (w) {
+    const ex = warrantyExpiry(w, it);
+    wtxt = (w.type || 'Warranty') + (w.covers ? ' (' + w.covers + ')' : '') + (w.termUnit === 'lifetime' ? ', lifetime' : ex ? ', ends ' + fmtDate(ex) : '') +
+      (ex && st.reported ? (daysBetween(st.reported, ex) >= 0 ? ' - in warranty when reported' : ' - had ended when reported') : w.termUnit === 'lifetime' ? ' - in warranty when reported' : '');
+  }
+  W.kv([['Fault first reported', fmtDate(st.reported) + (st.how ? ' by ' + st.how.toLowerCase() : '') + (c.provider ? ' to ' + c.provider : '')],
+    ['Ticket or reference', c.ticket], ['Their contact', c.contact],
+    [isOpenClaim(c) ? 'Open for' : 'Took', plural(st.days || 0, 'day') + (isOpenClaim(c) ? ' (as at ' + fmtDate(todayISO()) + ')' : ' (closed ' + fmtDate(c.closed) + ')')],
+    ['Follow-ups by you', String(st.followUps)], ['Contact from them', String(st.replies)],
+    ['Last contact', st.last ? fmtDate(st.last.date) + ' (' + st.last.kind.toLowerCase() + (st.last.direction === 'in' ? ', from them' : ', by you') + ')' : ''],
+    ['Longest wait with no contact', st.longestGap >= 1 ? plural(st.longestGap, 'day') : ''],
+    ['Next follow-up due', isOpenClaim(c) && c.followUp ? fmtDate(c.followUp) : ''],
+    ['Outcome', c.resolution]]);
+  W.heading('Item');
+  W.kv([['Item', it.name], ['Brand and model', [it.brand, it.model].filter(Boolean).join(' ')], ['Serial number', it.serial],
+    ['Location', [p ? p.name + (p.address ? ', ' + p.address : '') : '', it.location, it.spot].filter(Boolean).join(' · ')],
+    ['Bought', [fmtDate(it.purchaseDate), it.store, fmtMoney(it.price)].filter(Boolean).join(' · ')], ['Warranty', wtxt]]);
+  W.heading('What happened, in order');
+  const cols = [{ k: 'Date', w: 66 }, { k: 'Day', w: 34 }, { k: 'How', w: 74 }, { k: 'Who', w: 96 }, { k: 'Details', w: W.o.w - 2 * W.o.m - 270 }];
+  const head = () => {
+    W.ensure(26);
+    let x = W.o.m;
+    W.page.drawRectangle({ x: W.o.m, y: W.y - 16, width: W.o.w - 2 * W.o.m, height: 16, color: lib.rgb(0.95, 0.96, 0.97) });
+    cols.forEach((col) => { W.page.drawText(col.k, { x: x + 4, y: W.y - 11.5, size: 8.5, font: W.f.bold, color: lib.rgb(0.25, 0.27, 0.32) }); x += col.w; });
+    W.y -= 20;
+  };
+  head();
+  const who = c.provider || 'Them';
+  st.logs.forEach((l, i) => {
+    if (i > 0) {
+      const gap = daysBetween(st.logs[i - 1].date, l.date);
+      if (gap >= 7) { W.ensure(16); W.text(plural(gap, 'day') + ' with no contact', { size: 8.5, color: [0.63, 0.16, 0.16], x: W.o.m + 104 }); W.y -= 2; }
+    }
+    const day = daysBetween(st.reported, l.date);
+    const whoTxt = l.first ? 'You reported it' : l.direction === 'in' ? who + ' contacted you' : l.direction === 'out' ? 'You contacted ' + who : 'Note';
+    const detail = [l.text, l.ticket ? 'Ticket ' + l.ticket : '', l.contact ? 'Spoke with ' + l.contact : '', (l.fileIds || []).length ? plural(l.fileIds.length, 'file') + ' attached' : ''].filter(Boolean).join('\n');
+    const cells = [[fmtDate(l.date)], [day == null ? '' : 'Day ' + (day + 1)], W.wrap(l.kind, 8.5, W.f.reg, cols[2].w - 8), W.wrap(whoTxt, 8.5, W.f.reg, cols[3].w - 8), W.wrap(detail, 8.5, W.f.reg, cols[4].w - 8)];
+    const hgt = Math.max.apply(null, cells.map((x) => x.length)) * 11 + 6;
+    if (W.y - hgt < W.o.m + 14) { W.newPage(); head(); }
+    let x = W.o.m; const top = W.y;
+    cells.forEach((lines, n) => {
+      lines.forEach((ln, k) => W.page.drawText(pdfSafe(ln), { x: x + 4, y: top - 10 - k * 11, size: 8.5, font: n === 0 || (n === 3 && l.first) ? W.f.bold : W.f.reg, color: lib.rgb(0.07, 0.09, 0.15) }));
+      x += cols[n].w;
+    });
+    W.y -= hgt;
+    W.page.drawLine({ start: { x: W.o.m, y: W.y + 2 }, end: { x: W.o.w - W.o.m, y: W.y + 2 }, thickness: 0.4, color: lib.rgb(0.88, 0.89, 0.91) });
+  });
+  if (isOpenClaim(c) && st.logs.length) {
+    const since = daysBetween(st.logs[st.logs.length - 1].date, todayISO());
+    if (since >= 1) { W.y -= 4; W.text('No contact for ' + plural(since, 'day') + ' since the last entry (as at ' + fmtDate(todayISO()) + ').', { size: 9, color: [0.63, 0.16, 0.16] }); }
+  }
+  const docs = itemFiles(it.id).filter((f) => f.kind !== 'Claim pack');
+  if (docs.length) { W.heading('Documents on file'); docs.forEach((f) => W.text('- ' + fileCaption(f), { size: 9.5 })); W.y -= 2; W.text('Copies are available on request, or in the claim pack.', { size: 8.5, color: grey }); }
+  W.footer('Fault report: ' + it.name);
+  return W.doc.save();
+}
 /* ---------- routing ---------- */
 function render() {
   const app = $('#app'); if (!app || !D) return;
@@ -1906,6 +2049,7 @@ function render() {
     case 'claim': html = viewClaim(parts[1]); break;
     case 'claimform': html = viewClaimForm(parts[1], parts[2]); break;
     case 'reports': html = viewReports(); break;
+    case 'service': html = viewService(); break;
     default: html = viewHome();
   }
   app.innerHTML = html;
@@ -2058,6 +2202,18 @@ const ACT = {
   vext() { const f = VIEW && VIEW.f; closeViewer(); if (f) openFile(f); },
   vzoom(el) { if (!VIEW) return; VIEW.zoom = Math.min(3, Math.max(1, VIEW.zoom + (+el.dataset.v) * 0.5)); drawViewer(); },
   async vcrop(el) { el.disabled = true; el.textContent = 'Preparing page…'; try { await cropFromPdfPage(+el.dataset.v); } catch (e) { toast('Could not open that page: ' + e.message.slice(0, 80)); el.disabled = false; } },
+  gofilter(el) { ITEMS_F = Object.assign(ITEMS_F, { st: el.dataset.v, q: '', prop: 'all', cat: '', arch: false }); go('#/items'); },
+  async faultreport(el) {
+    const c = D.claims[el.dataset.id], it = D.items[c.itemId];
+    el.disabled = true; const was = el.innerHTML; el.textContent = 'Making report…';
+    try {
+      const bytes = await buildFaultReport(c);
+      const st = claimStats(c);
+      readySheet(new Blob([bytes], { type: 'application/pdf' }), 'Fault-report-' + safeName(it.name, 30) + '-' + todayISO() + '.pdf', 'Fault report ready',
+        'Reported ' + fmtDate(st.reported) + ' · ' + plural(st.logs.length, 'entry').replace('entrys', 'entries') + ' · ' + plural(st.days || 0, 'day') + (isOpenClaim(c) ? ' open' : ''));
+    } catch (e) { toast('Could not make the report: ' + e.message.slice(0, 80)); }
+    el.disabled = false; el.innerHTML = was;
+  },
   logsheet(el) { logSheet(el.dataset.id, el.dataset.item, el.dataset.claim); },
   async dellog(el) { if (!confirm('Delete this entry?')) return; const l = D.logs[el.dataset.id]; l.deleted = true; touch(l); await saveData(); closeSheet(); render(); },
   async delclaim(el) {
@@ -2140,9 +2296,11 @@ document.addEventListener('change', async (e) => {
   if (t.id === 'claimStatus') {
     const c = D.claims[t.dataset.id]; c.status = t.value;
     if (!isOpenClaim(c) && !c.closed) c.closed = todayISO();
+    if (!isOpenClaim(c)) c.followUp = '';
     if (isOpenClaim(c)) c.closed = '';
     touch(c); await saveData(); render(); toast('Status: ' + c.status); return;
   }
+  if (t.id === 'fst') { ITEMS_F.st = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'repProp') { REP.prop = t.value; render(); return; }
   if (t.id === 'repArch') { REP.arch = t.checked; render(); return; }
   if (t.id === 'ownerSel') { S.owner = t.value; saveSettings(); toast('Saved'); return; }
@@ -2242,10 +2400,13 @@ document.addEventListener('submit', async (e) => {
     const c = id ? D.claims[id] : { id: uid(), itemId, createdAt: Date.now() };
     ['title', 'opened', 'status', 'warrantyId', 'provider', 'ticket', 'contact'].forEach((k) => { c[k] = v(k); });
     if (id) { c.closed = v('closed'); c.resolution = v('resolution'); }
+    else c.followUp = v('followUp');
     if (!isOpenClaim(c) && !c.closed) c.closed = todayISO();
+    if (!isOpenClaim(c)) c.followUp = '';
     D.claims[c.id] = touch(c);
     if (!id) {
-      const l = touch({ id: uid(), itemId, claimId: c.id, date: c.opened || todayISO(), kind: 'Fault', ticket: c.ticket, contact: c.contact, text: v('text'), fileIds: [], createdAt: Date.now() });
+      const l = touch({ id: uid(), itemId, claimId: c.id, date: c.opened || todayISO(), kind: v('how') || 'Note', first: true, direction: v('how') && v('how') !== 'Note' ? 'out' : '',
+        ticket: c.ticket, contact: c.contact, text: v('text') || 'Fault: ' + c.title, fileIds: [], createdAt: Date.now() });
       D.logs[l.id] = l;
     }
     await saveData(); toast(id ? 'Saved' : 'Claim started'); go('#/claim/' + c.id);
@@ -2253,11 +2414,14 @@ document.addEventListener('submit', async (e) => {
     const id = form.dataset.id;
     const l = id ? D.logs[id] : { id: uid(), itemId: form.dataset.item, claimId: form.dataset.claim || null, createdAt: Date.now() };
     ['date', 'kind', 'ticket', 'contact', 'text'].forEach((k) => { l[k] = v(k); });
+    if (!l.first) l.direction = v('direction');
     l.fileIds = fd.getAll('file').map(String);
+    const cl = l.claimId && D.claims[l.claimId];
+    if (cl && fd.has('followUp') && (cl.followUp || '') !== v('followUp')) { cl.followUp = v('followUp'); touch(cl); }
     if (!l.text && !l.fileIds.length && !l.ticket) { toast('Add some details first'); return; }
     D.logs[l.id] = touch(l);
     if (l.claimId && l.ticket && D.claims[l.claimId] && !D.claims[l.claimId].ticket) { D.claims[l.claimId].ticket = l.ticket; touch(D.claims[l.claimId]); }
-    await saveData(); closeSheet(); render(); toast('Entry saved');
+    await saveData(); closeSheet(); render(); toast('Update saved');
   } else if (kind === 'svc') {
     const id = form.dataset.id;
     if (!v('job') || !(+v('everyMonths') > 0)) { toast('Enter the job and how often'); return; }

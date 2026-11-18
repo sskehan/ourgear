@@ -3,7 +3,7 @@
 Purchases, receipts and warranties for everything we own, at home and at the rentals.
 Offline Android web app. Records live on the phone and sync through Dropbox.
 
-**Version 1.03** · App: https://sskehan.github.io/ourgear/
+**Version 1.04** · App: https://sskehan.github.io/ourgear/
 
 ## Files to upload to the repo
 
@@ -32,6 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.04: fault report PDF (when and how it was reported, every follow-up, gaps with no contact), follow-up dates shown on Home, who-contacted-whom on updates, claim summary panel, new icons, Home tiles open matching lists, warranty filter on Items, service jobs screen, clearer forms
 - 1.03: claims and fault log (Claims tab, timeline with tickets, contacts and attachments), one-tap claim pack PDF, insurance inventory (PDF and spreadsheet), service jobs with due dates, Send to Our Tax for work items
 - 1.02: view PDFs and photos inside the app (pages, zoom), PDF previews in lists, read store/date/total from PDF invoices, crop a receipt out of any PDF page (kept together with the PDF), share any file type to the app
 - 1.01: receipt reading on the phone (store, date, total), share notes and several files at once with details picked up from the note text, Evernote .enex import with review queue (Lifetime / Last 5 years / Older piles, duplicate check, merge, archive older in one go)

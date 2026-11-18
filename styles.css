@@ -151,3 +151,10 @@ h2 { font-size: 16px; margin: 0; font-weight: 700; }
 .pickfiles input:checked + img { border-color: var(--accent); }
 .pickfiles span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .nav a { font-size: 10.5px; }
+
+/* v1.04: summary panel, contact direction, stat buttons */
+button.stat { text-align: left; cursor: pointer; font: inherit; color: var(--text); }
+.summary ul { margin: 6px 0 8px; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+.entry-dir { font-size: 12.5px; font-weight: 600; color: var(--accent-text); }
+.entry-in { border-color: var(--accent); background: var(--accent-soft); }
+.btn svg { flex: none; }
