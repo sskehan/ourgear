@@ -1,5 +1,5 @@
 /* Our Gear service worker. Bump CACHE with every release. */
-const CACHE = 'ourgear-1.0';
+const CACHE = 'ourgear-1.01';
 const SHELL = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest',
   './icon.svg', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 
@@ -25,7 +25,11 @@ self.addEventListener('fetch', (e) => {
     e.respondWith(caches.match('./index.html').then((r) => r || fetch(e.request)));
     return;
   }
-  e.respondWith(caches.match(e.request, { ignoreSearch: true }).then((r) => r || fetch(e.request)));
+  // Cache-first; anything fetched later (like the receipt reader) is kept for offline use.
+  e.respondWith(caches.match(e.request, { ignoreSearch: true }).then((r) => r || fetch(e.request).then((res) => {
+    if (res.ok && res.type === 'basic') { const copy = res.clone(); caches.open(CACHE).then((c) => c.put(e.request, copy)); }
+    return res;
+  })));
 });
 
 function openDb() {
@@ -44,11 +48,13 @@ async function handleShare(request) {
   try {
     const fd = await request.formData();
     const files = fd.getAll('files').filter((f) => f && f.size);
+    const batch = { files: files.map((f) => ({ blob: f, name: f.name || 'shared', type: f.type || '' })),
+      title: String(fd.get('title') || ''), text: [fd.get('text'), fd.get('url')].filter(Boolean).join('\n') };
+    if (!batch.files.length && !batch.title && !batch.text) return Response.redirect('./#/inbox', 303);
     const db = await openDb();
     await new Promise((res, rej) => {
       const t = db.transaction('share', 'readwrite');
-      const s = t.objectStore('share');
-      files.forEach((f, i) => s.put({ blob: f, name: f.name || 'shared', type: f.type || '' }, Date.now() + '-' + i));
+      t.objectStore('share').put(batch, Date.now() + '-' + Math.random().toString(16).slice(2, 8));
       t.oncomplete = res; t.onerror = () => rej(t.error);
     });
   } catch (err) { /* fall through to the app; it will show nothing new */ }

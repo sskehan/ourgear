@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.01';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Shared'];
@@ -80,7 +80,7 @@ function emptyData() {
   return { schema: 1, items: {}, warranties: {}, files: {}, lists: JSON.parse(JSON.stringify(DEFAULT_LISTS)) };
 }
 function defaultSettings() {
-  return { theme: 'indigo', wifiOnly: true, owner: 'Shaun', lastSync: 0, lastSyncMsg: '' };
+  return { theme: 'indigo', wifiOnly: true, autoRead: true, owner: 'Shaun', lastSync: 0, lastSyncMsg: '' };
 }
 function live(coll) { return Object.values(D[coll]).filter((r) => !r.deleted); }
 function touch(rec) { rec.updatedAt = Date.now(); rec.by = S ? S.owner : ''; return rec; }
@@ -399,8 +399,7 @@ async function dropThumb(id) {
 async function hydrateThumbs() {
   const imgs = document.querySelectorAll('img[data-thumb]');
   for (const img of imgs) {
-    const f = D.files[img.dataset.thumb];
-    if (!f) continue;
+    const f = D.files[img.dataset.thumb] || { id: img.dataset.thumb, uploaded: false };
     const u = await thumbUrl(f);
     if (u && img.isConnected) img.src = u;
   }
@@ -636,6 +635,8 @@ function viewHome() {
     h += '<a class="card pad row" href="#/suggest" style="border-bottom:1px solid var(--border)"><div class="grow"><div class="t">' + sugg.length + ' item' + (sugg.length > 1 ? 's' : '') + ' could be archived</div>' +
       '<div class="s">Gone from the house, or warranties ended over 2 years ago</div></div><span class="badge b-arch">Review</span></a>';
   }
+  const impLeft = impPending().length;
+  if (impLeft) h += '<a class="card pad row" href="#/import"><div class="grow"><div class="t">Import review</div><div class="s">' + impLeft + ' note' + (impLeft > 1 ? 's' : '') + ' still to check</div></div><span class="badge b-life">Continue</span></a>';
   if (!DBX.connected()) h += '<div class="warn">Dropbox isn\'t connected, so nothing is backed up yet. <a href="#/settings">Connect in Settings</a>.</div>';
   return h + '</main>' + nav('home');
 }
@@ -741,6 +742,8 @@ function viewItemEdit(id) {
   h += '<label class="field"><span>Status</span><select name="status">' + ITEM_STATUS.map((s) => opt(s, it.status || 'Active')).join('') + '</select></label>';
   h += '<label class="check"><input type="checkbox" name="work"' + (it.work ? ' checked' : '') + '> Work deduction (for Our Tax)</label>';
   h += '<label class="field"><span>Notes</span><textarea name="notes">' + esc(it.notes || '') + '</textarea></label>';
+  if (isNew && NEW_ITEM_PREFILL && NEW_ITEM_PREFILL._lifetime) h += '<div class="note">The note mentions a lifetime warranty, so a Lifetime warranty will be added. You can change it after saving.</div>';
+  if (isNew && NEW_ITEM_PREFILL && NEW_ITEM_PREFILL._fileIds && NEW_ITEM_PREFILL._fileIds.length > 1) h += '<div class="muted">' + NEW_ITEM_PREFILL._fileIds.length + ' files will be attached.</div>';
   h += '<button class="btn primary big" type="submit">' + (isNew ? 'Add item' : 'Save') + '</button></form></main>';
   return h + nav('items');
 }
@@ -803,6 +806,7 @@ function viewSnap() {
   const it = SNAP.itemId && D.items[SNAP.itemId];
   let h = header('Details', { right: '<button class="iconbtn" data-act="snapcancel" aria-label="Cancel" style="font-size:14px;width:auto;padding:0 8px">Cancel</button>', sub: it ? 'For ' + it.name : '' });
   h += '<main>' + (SNAP.isPdf ? '<div class="card empty">PDF: ' + esc(SNAP.file.name || 'document') + '</div>' : '<img class="preview" id="snapprev" alt="Cropped image">');
+  if (!SNAP.isPdf && S.autoRead) h += '<div class="muted" id="ocrmsg">' + esc(SNAP.ocrMsg || 'Reading receipt…') + '</div>';
   h += '<form class="form" data-form="snap">';
   h += '<label class="field"><span>What is it?</span><select name="kind">' + FILE_KINDS.map((k) => opt(k, SNAP.kind)).join('') + '</select></label>';
   h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(SNAP.date) + '"></label>' +
@@ -851,6 +855,9 @@ function viewSettings() {
     [['categories', 'Categories'], ['locations', 'Locations'], ['warrantyTypes', 'Warranty types']].map((x) =>
       '<label class="field"><span>' + x[1] + ' (one per line)</span><textarea id="list-' + x[0] + '" rows="5">' + esc(D.lists[x[0]].join('\n')) + '</textarea></label>').join('') +
     '<button class="btn primary" data-act="savelists">Save lists</button></div></section>';
+  h += '<section class="section"><h2>Import</h2><div class="card pad form"><div class="muted">Bring in old receipts from Evernote, or share notes from OneNote.</div><a class="btn" href="#/import">Import from Evernote</a>' +
+    '<label class="check"><input type="checkbox" data-act="autoread"' + (S.autoRead ? ' checked' : '') + '> Read receipts automatically after cropping</label>' +
+    '<div class="muted">Reading happens on this phone. The first time, it downloads about 7 MB, then works offline.</div></div></section>';
   h += '<section class="section"><h2>Backup</h2><div class="card pad form"><div class="muted">Dropbox already holds everything. This is an extra copy of your records and previews in one file.</div>' +
     '<div class="btns"><button class="btn" data-act="export">Save backup file</button><label class="btn quiet" for="restoreIn">Restore from file</label></div>' +
     '<input id="restoreIn" class="sr" type="file" accept="application/json,.json"></div></section>';
@@ -868,7 +875,10 @@ function fileSheet(id) {
   const it = f.itemId && D.items[f.itemId] && !D.items[f.itemId].deleted ? D.items[f.itemId] : null;
   let h = sheetHead(f.kind || 'File');
   h += f.mime === 'application/pdf' ? '<div class="card empty">PDF document</div>' : '<img class="preview" data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
-  h += '<button class="btn" data-act="openfile" data-id="' + id + '">Open full file</button>';
+  h += '<div class="btns"><button class="btn" data-act="openfile" data-id="' + id + '">Open full file</button>' + (f.mime === 'image/jpeg' ? '<button class="btn quiet" data-act="readfile" data-id="' + id + '">Read receipt</button>' : '<span></span>') + '</div>';
+  if (f.note) h += '<details><summary class="muted">Shared note text' + (f.lifetime ? ' (mentions lifetime)' : '') + '</summary><div style="white-space:pre-line;font-size:13px;margin-top:6px">' + esc(f.note.slice(0, 2000)) + '</div></details>';
+  const grp = groupFiles(f).length;
+  if (!it && grp > 1) h += '<div class="muted">Shared together with ' + (grp - 1) + ' other file' + (grp > 2 ? 's' : '') + '. Filing this one files them all.</div>';
   h += '<form class="form" data-form="file" data-id="' + id + '">' +
     '<label class="field"><span>What is it?</span><select name="kind">' + FILE_KINDS.map((k) => opt(k, f.kind)).join('') + '</select></label>' +
     '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(f.date || '') + '"></label>' +
@@ -908,6 +918,349 @@ function propSheet(id) {
 function addFileSheet(itemId) {
   SNAP_TARGET = itemId; go('#/snap');
 }
+/* ---------- v1.01: reading receipts (on the phone, free) ---------- */
+const KNOWN_STORES = ['Bunnings', 'Harvey Norman', 'JB Hi-Fi', 'The Good Guys', 'Officeworks', 'Kmart', 'Big W', 'Costco', 'Amazon',
+  'Appliances Online', 'Aldi', 'Woolworths', 'Coles', 'Reece', 'Total Tools', 'Sydney Tools', 'Supercheap Auto', 'Repco', 'IKEA', 'Myer',
+  'David Jones', 'Apple', 'Samsung', 'eBay', 'Mitre 10', 'Home Hardware', 'Godfreys', 'Bing Lee', 'Domayne', 'Joyce Mayne', 'Retravision',
+  'Betta', 'Anaconda', 'BCF', 'Rebel', 'Catch', 'Temu', 'Spotlight', 'Freedom', 'Fantastic Furniture', 'Amart', 'Beacon Lighting',
+  'Tradelink', 'Middys', 'Jaycar', 'Altronics', 'Dick Smith', 'Telstra', 'Optus', 'Vodafone', 'Autobarn', 'Bob Jane', 'Beaurepaires',
+  'Ozito', 'Makita', 'Dyson', 'Kogan', 'Reolink', 'Tesla'];
+function validDate(y, m, d, now) {
+  if (y < 100) y += 2000;
+  if (y < 1990 || m < 1 || m > 12 || d < 1) return null;
+  if (d > new Date(Date.UTC(y, m, 0)).getUTCDate()) return null;
+  const iso = y + '-' + pad2(m) + '-' + pad2(d);
+  if (daysUntil(iso, now) > 1) return null; // a receipt can't be in the future
+  return iso;
+}
+function findDate(text, now) {
+  const mon = 'jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec';
+  const pats = [
+    [/\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b/g, (m) => validDate(+m[1], +m[2], +m[3], now)],
+    [/\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})\b/g, (m) => validDate(+m[3], +m[2], +m[1], now)],
+    [new RegExp('\\b(\\d{1,2})(?:st|nd|rd|th)?[\\s-]+(' + mon + ')[a-z]*\\.?,?[\\s-]+(\\d{2,4})\\b', 'gi'),
+      (m) => validDate(+m[3], ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(m[2].slice(0, 3).toLowerCase()) + 1, +m[1], now)],
+    [new RegExp('\\b(' + mon + ')[a-z]*\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})\\b', 'gi'),
+      (m) => validDate(+m[3], ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(m[1].slice(0, 3).toLowerCase()) + 1, +m[2], now)]
+  ];
+  let best = null;
+  for (const [re, fn] of pats) {
+    let m;
+    while ((m = re.exec(text))) { const iso = fn(m); if (iso && (!best || m.index < best.at)) best = { iso, at: m.index }; }
+  }
+  return best ? best.iso : '';
+}
+function amountsIn(line) {
+  const out = [], re = /(?:\$|aud\s?)?\s?(\d{1,3}(?:,\d{3})+|\d{1,6})[.,](\d{2})(?!\d)/gi;
+  let m;
+  while ((m = re.exec(line))) out.push(+(m[1].replace(/,/g, '') + '.' + m[2]));
+  const whole = /\$\s?(\d{1,3}(?:,\d{3})+|\d{1,6})(?![\d.,]*\d)/g; // "$450" in hand-typed notes
+  while ((m = whole.exec(line))) out.push(+m[1].replace(/,/g, ''));
+  return out.filter((v) => v > 0 && v < 200000);
+}
+function findTotal(text) {
+  const lines = text.split(/\r?\n/);
+  let best = null;
+  lines.forEach((ln, i) => {
+    if (!/\b(total|amount\s+due|balance\s+due|amount\s+paid|eftpos|visa|mastercard|card\s+payment|purchase)\b/i.test(ln)) return;
+    if (/sub\s*-?\s*total|gst|tax\b|change|saving|discount|rounding|points/i.test(ln)) return;
+    let am = amountsIn(ln);
+    if (!am.length && lines[i + 1]) am = amountsIn(lines[i + 1]);
+    am.forEach((v) => { if (best == null || v > best) best = v; });
+  });
+  if (best == null) { const all = amountsIn(text); if (all.length) best = Math.max.apply(null, all); }
+  return best == null ? '' : best;
+}
+function findStore(text, knownOnly) {
+  const low = text.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ');
+  for (const s of KNOWN_STORES) {
+    const k = s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ');
+    if (new RegExp('\\b' + k.replace(/\s+/g, '\\s*') + '\\b').test(low)) return s;
+  }
+  if (knownOnly) return '';
+  for (const raw of text.split(/\r?\n/).slice(0, 6)) {
+    const ln = raw.replace(/[^A-Za-z0-9&' -]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if ((ln.match(/[A-Za-z]/g) || []).length < 3) continue;
+    if (/tax\s*invoice|receipt|abn|invoice|welcome|thank|phone|ph\b|www|http|^date/i.test(ln)) continue;
+    return ln.slice(0, 40).replace(/(^|[\s-])([a-z])([a-z']*)/gi, (m, sp, a, b) => sp + a.toUpperCase() + b.toLowerCase());
+  }
+  return '';
+}
+/* Pull store, date, total and a lifetime flag out of receipt or note text. */
+/* knownOnly: for typed notes, only name a store we recognise (the first line is usually the item, not the shop). */
+function parseReceiptText(text, now, knownOnly) {
+  const t = String(text || '');
+  return { store: findStore(t, knownOnly), date: findDate(t, now), total: findTotal(t), lifetime: /life\s?-?time/i.test(t) };
+}
+
+let ocrWorker = null, ocrLoading = null;
+function loadScript(src) {
+  return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = () => rej(new Error('Could not load ' + src)); document.head.appendChild(s); });
+}
+async function getOcr() {
+  if (ocrWorker) return ocrWorker;
+  if (!ocrLoading) {
+    ocrLoading = (async () => {
+      if (typeof Tesseract === 'undefined') await loadScript('tesseract.min.js');
+      const abs = (p) => new URL(p, location.href).href;
+      ocrWorker = await Tesseract.createWorker('eng', 1, {
+        workerPath: abs('worker.min.js'), corePath: abs('tesseract-core-simd-lstm.wasm.js'), langPath: abs('./').replace(/\/$/, ''), gzip: true
+      });
+      return ocrWorker;
+    })();
+  }
+  try { return await ocrLoading; } catch (e) { ocrLoading = null; throw e; }
+}
+async function readReceipt(blob) {
+  const w = await getOcr();
+  const r = await w.recognize(blob);
+  return Object.assign({ text: r.data.text || '' }, parseReceiptText(r.data.text || ''));
+}
+/* Fill only the empty boxes in a form, so nothing typed is overwritten. */
+function fillEmpty(form, vals) {
+  let n = 0;
+  [['store', vals.store], ['date', vals.date], ['total', vals.total]].forEach(([k, v]) => {
+    const el = form && form.querySelector('[name="' + k + '"]');
+    if (!el || v === '' || v == null) return;
+    if (k === 'date' ? (el.value && el.value !== todayISO()) : el.value) return;
+    el.value = v; n++;
+  });
+  return n;
+}
+/* ---------- v1.01: shared notes and files ---------- */
+function firstLine(s) { return String(s || '').split(/\r?\n/).map((x) => x.trim()).find(Boolean) || ''; }
+async function importShared() {
+  const keys = await idb.keys('share');
+  if (!keys.length) return;
+  let n = 0;
+  for (const k of keys) {
+    const s = await idb.get('share', k);
+    try {
+      const batch = s && s.files ? s : { files: s ? [s] : [], title: '', text: '' };
+      const text = [batch.title, batch.text].filter(Boolean).join('\n').trim();
+      const p = text ? parseReceiptText(text, null, true) : {};
+      if (!batch.files.length) {
+        if (text) NEW_ITEM_PREFILL = { name: firstLine(batch.title || text).slice(0, 80), notes: text, store: p.store || '', purchaseDate: p.date || '', price: p.total === '' ? '' : p.total, _lifetime: !!p.lifetime };
+        continue;
+      }
+      const gid = uid();
+      for (const sf of batch.files) {
+        const isPdf = sf.type === 'application/pdf' || /\.pdf$/i.test(sf.name || '');
+        const isImg = /^image\//.test(sf.type || '');
+        let full = sf.blob, thumb = null;
+        if (isImg) { const r = await quickCompress(sf.blob); full = r.full; thumb = r.thumb; }
+        const f = touch({ id: uid(), itemId: null, kind: isPdf ? 'Tax invoice' : isImg ? 'Receipt' : 'Other', date: p.date || todayISO(), store: p.store || '',
+          total: p.total === undefined ? '' : p.total, mime: isImg ? 'image/jpeg' : (sf.type || 'application/octet-stream'), origName: sf.name || '',
+          size: full.size, uploaded: false, path: null, createdAt: Date.now(), groupId: gid, title: batch.title || '', note: text, lifetime: !!p.lifetime });
+        await idb.put('blobs', f.id, full); if (thumb) await idb.put('thumbs', f.id, thumb);
+        D.files[f.id] = f; n++;
+      }
+    } finally { await idb.del('share', k); }
+  }
+  if (n) { await saveData(); toast(n + ' file' + (n > 1 ? 's' : '') + ' added to inbox'); }
+  if (NEW_ITEM_PREFILL && !n) { location.hash = '#/new'; toast('Note shared: check the details and save'); }
+}
+function groupFiles(f) { return f.groupId ? inboxFiles().filter((x) => x.groupId === f.groupId) : [f]; }
+
+/* ---------- v1.01: Evernote (.enex) import ---------- */
+let IMP = null;          // import state, saved in IndexedDB
+let IMP_PILE = 'recent';
+let IMP_RUN = null;      // {done, size} while reading the file
+const PILES = [['life', 'Lifetime'], ['recent', 'Last 5 years'], ['old', 'Older']];
+async function loadImport() { IMP = (await idb.get('kv', 'import')) || null; }
+async function saveImport() { await idb.put('kv', 'import', IMP); }
+function impPending(pile) { return IMP ? IMP.order.map((id) => IMP.drafts[id]).filter((d) => d.status === 'pending' && (!pile || d.pile === pile)) : []; }
+
+function bytesIndexOf(hay, needle, from) {
+  const first = needle[0];
+  for (let i = hay.indexOf(first, from || 0); i !== -1 && i <= hay.length - needle.length; i = hay.indexOf(first, i + 1)) {
+    let ok = true;
+    for (let j = 1; j < needle.length; j++) if (hay[i + j] !== needle[j]) { ok = false; break; }
+    if (ok) return i;
+  }
+  return -1;
+}
+/* Read the export a few MB at a time, one note at a time, so big files don't run the phone out of memory. */
+async function* enexNotes(file, start) {
+  const enc = new TextEncoder(), dec = new TextDecoder('utf-8'), OPEN = enc.encode('<note>'), CLOSE = enc.encode('</note>'), CH = window.OG_CHUNK || 4 * 1024 * 1024;
+  let pos = start || 0, buf = new Uint8Array(0), bufStart = pos;
+  while (true) {
+    let c;
+    while ((c = bytesIndexOf(buf, CLOSE, 0)) !== -1) {
+      const o = bytesIndexOf(buf, OPEN, 0);
+      const end = c + CLOSE.length;
+      yield { xml: dec.decode(buf.subarray(o !== -1 && o < c ? o : 0, end)), endOffset: bufStart + end };
+      buf = buf.slice(end); bufStart += end;
+    }
+    if (pos >= file.size) break;
+    const chunk = new Uint8Array(await file.slice(pos, pos + CH).arrayBuffer());
+    pos += chunk.length;
+    const nb = new Uint8Array(buf.length + chunk.length); nb.set(buf); nb.set(chunk, buf.length); buf = nb;
+    IMP_RUN.done = pos;
+  }
+}
+function enmlToText(enml) {
+  const doc = new DOMParser().parseFromString(String(enml || '').replace(/<\?xml[^>]*\?>|<!DOCTYPE[^>]*>/gi, ''), 'text/html');
+  doc.querySelectorAll('br').forEach((b) => b.replaceWith('\n'));
+  doc.querySelectorAll('div,p,li,tr,h1,h2,h3,h4,en-todo').forEach((b) => b.append('\n'));
+  return (doc.body ? doc.body.textContent : '').replace(/ /g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+function enDate(s) { const m = /^(\d{4})(\d{2})(\d{2})T/.exec(s || ''); return m ? m[1] + '-' + m[2] + '-' + m[3] : ''; }
+function normName(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function findDuplicate(d) {
+  const n = normName(d.title);
+  for (const it of live('items')) {
+    if (n && n.length > 3 && normName(it.name) === n) return it.id;
+    if (d.date && d.total !== '' && itemFiles(it.id).some((f) => f.date === d.date && +f.total === +d.total)) return it.id;
+  }
+  return null;
+}
+function pileFor(d) {
+  if (d.lifetime) return 'life';
+  const days = d.date ? daysUntil(d.date) : null;
+  return days != null && days >= -365 * 5 ? 'recent' : 'old';
+}
+async function draftFromNote(xml) {
+  const doc = new DOMParser().parseFromString(xml, 'application/xml');
+  if (doc.querySelector('parsererror')) return null;
+  const q = (sel) => { const e = doc.querySelector(sel); return e ? e.textContent : ''; };
+  const title = q('note > title').trim() || 'Untitled note';
+  const text = enmlToText(q('note > content'));
+  const p = parseReceiptText(title + '\n' + text, null, true);
+  const created = enDate(q('note > created'));
+  const d = { id: uid(), title: title.slice(0, 120), text: text.slice(0, 6000), created, store: p.store, date: p.date || created, total: p.total,
+    lifetime: p.lifetime, tags: Array.from(doc.querySelectorAll('note > tag')).map((t) => t.textContent).join(', '), files: [], status: 'pending' };
+  for (const r of doc.querySelectorAll('note > resource')) {
+    const mime = (r.querySelector('mime') || {}).textContent || 'application/octet-stream';
+    const dataEl = r.querySelector('data');
+    if (!dataEl) continue;
+    const b64 = dataEl.textContent.replace(/\s+/g, '');
+    if (b64.length < 16000 && /^image\//.test(mime)) continue; // skip tiny images (logos, icons)
+    const name = (r.querySelector('resource-attributes > file-name') || {}).textContent || '';
+    let blob = await (await fetch('data:' + mime + ';base64,' + b64)).blob();
+    const fid = uid();
+    let outMime = mime, thumb = null;
+    if (/^image\/(jpeg|png|gif|webp|bmp|heic|heif)/.test(mime)) {
+      try { const c = await quickCompress(blob); blob = c.full; thumb = c.thumb; outMime = 'image/jpeg'; } catch (e) { /* keep original */ }
+    }
+    await idb.put('blobs', fid, blob); if (thumb) await idb.put('thumbs', fid, thumb);
+    d.files.push({ id: fid, mime: outMime, origName: name, size: blob.size });
+  }
+  d.pile = pileFor(d);
+  d.dup = findDuplicate(d);
+  return d;
+}
+async function startEnex(file) {
+  if (!file) return;
+  if (IMP && !IMP.done && (IMP.fileName !== file.name || IMP.size !== file.size)) { toast('Finish or clear the current import first'); return; }
+  if (IMP && IMP.done && impPending().length) { toast('Finish or clear the current review first'); return; }
+  if (!IMP || IMP.done) IMP = { source: 'Evernote', fileName: file.name, size: file.size, offset: 0, count: 0, done: false, drafts: {}, order: [] };
+  IMP_RUN = { done: IMP.offset, size: file.size };
+  render();
+  let since = 0;
+  try {
+    for await (const note of enexNotes(file, IMP.offset)) {
+      const d = await draftFromNote(note.xml);
+      if (d) { IMP.drafts[d.id] = d; IMP.order.push(d.id); IMP.count++; }
+      IMP.offset = note.endOffset;
+      if (++since >= 15) { since = 0; await saveImport(); }
+      const el = $('#impprog'); if (el) el.textContent = IMP.count + ' notes read · ' + Math.round(100 * IMP_RUN.done / IMP_RUN.size) + '%';
+    }
+    IMP.done = true; await saveImport(); IMP_RUN = null;
+    const piles = PILES.map(([k]) => impPending(k).length);
+    IMP_PILE = piles[1] ? 'recent' : piles[0] ? 'life' : 'old';
+    toast(IMP.count + ' notes ready to review'); render();
+  } catch (e) {
+    await saveImport(); IMP_RUN = null; render();
+    toast('Import stopped: ' + e.message.slice(0, 100) + '. Pick the same file to carry on.');
+  }
+}
+async function clearImport() {
+  if (!IMP) return;
+  for (const d of Object.values(IMP.drafts)) if (d.status === 'pending') for (const f of d.files) { await idb.del('blobs', f.id); await dropThumb(f.id); }
+  IMP = null; await idb.del('kv', 'import');
+}
+/* Turn a reviewed draft into an item (or add it to an existing one). */
+function draftFileRecs(d, itemId) {
+  return d.files.map((x) => touch({ id: x.id, itemId, kind: /^image\//.test(x.mime) ? 'Receipt' : x.mime === 'application/pdf' ? 'Tax invoice' : 'Other',
+    date: d.date || '', store: d.store || '', total: d.total === undefined ? '' : d.total, mime: x.mime, origName: x.origName, size: x.size,
+    uploaded: false, path: null, createdAt: Date.now() }));
+}
+function acceptDraft(d, vals, archived) {
+  const it = touch({ id: uid(), createdAt: Date.now(), name: vals.name || d.title, category: vals.category || '', brand: '', model: '', serial: '',
+    propertyId: vals.propertyId || (D.lists.properties[0] || {}).id, location: vals.location || '', spot: '', owner: 'Shared', store: vals.store || '',
+    purchaseDate: vals.date || '', installDate: '', price: vals.total === '' || vals.total == null ? '' : +vals.total, replacementValue: '', status: 'Active',
+    work: false, notes: d.text + (d.tags ? '\n\nTags: ' + d.tags : '') + '\n\n(Imported from ' + IMP.source + ')', archived: !!archived, archivedAt: archived ? Date.now() : null });
+  D.items[it.id] = it;
+  draftFileRecs(Object.assign({}, d, { date: vals.date, store: vals.store, total: vals.total }), it.id).forEach((f) => { D.files[f.id] = f; });
+  const term = vals.warranty || (d.lifetime ? 'lifetime' : '');
+  if (term) {
+    const w = touch({ id: uid(), itemId: it.id, createdAt: Date.now(), type: 'Maker', covers: '', startFrom: 'purchase', startDate: '', expiryOverride: '',
+      provider: '', contact: '', conditions: '', termUnit: term === 'lifetime' ? 'lifetime' : 'years', termValue: term === 'lifetime' ? '' : term });
+    D.warranties[w.id] = w;
+  }
+  d.status = 'accepted'; d.itemId = it.id;
+  return it;
+}
+
+function viewImport() {
+  let h = header('Import', { back: '#/settings', sub: IMP ? IMP.source + ' · ' + IMP.fileName : 'Evernote export file' });
+  h += '<main>';
+  if (IMP_RUN) {
+    h += '<div class="card pad"><div class="t" style="font-weight:700">Reading notes…</div><div class="muted" id="impprog">' + (IMP ? IMP.count : 0) + ' notes read</div>' +
+      '<p class="muted">Keep the app open. If it stops, pick the same file again and it carries on where it left off.</p></div>';
+    return h + '</main>' + nav('settings');
+  }
+  if (!IMP || (IMP.done && !impPending().length)) {
+    if (IMP && IMP.done) h += '<div class="note">Import finished: ' + IMP.order.filter((id) => IMP.drafts[id].status === 'accepted').length + ' added, ' +
+      IMP.order.filter((id) => IMP.drafts[id].status === 'skipped').length + ' skipped. <button class="btn quiet" style="margin-top:8px;width:100%" data-act="impclear">Clear import record</button></div>';
+    h += '<div class="card pad form"><div class="t" style="font-weight:700">Evernote</div><div class="muted">Export each notebook as an .enex file from the Evernote desktop app (Windows or Mac), save it to Dropbox, then pick it here. Every note becomes a draft for you to check.</div>' +
+      '<label class="btn primary" for="enexIn">Pick .enex file</label><input id="enexIn" class="sr" type="file"></div>';
+    h += '<div class="card pad form"><div class="t" style="font-weight:700">OneNote and anything else</div><div class="muted">Open a note on your phone, tap Share and choose Our Gear. Photos and PDFs land in the inbox with the note\'s text, and the store, date, price and "lifetime" are picked up for you.</div></div>';
+    return h + '</main>' + nav('settings');
+  }
+  if (!IMP.done) {
+    h += '<div class="warn">Reading stopped part-way (' + IMP.count + ' notes so far). Pick the same file to carry on.</div>' +
+      '<label class="btn primary big" for="enexIn">Pick ' + esc(IMP.fileName) + '</label><input id="enexIn" class="sr" type="file">' +
+      '<button class="btn danger" data-act="impclear">Cancel import</button>';
+    return h + '</main>' + nav('settings');
+  }
+  const all = impPending().length, total = IMP.order.length;
+  h += '<div class="card pad"><div style="height:8px;border-radius:4px;background:var(--border)"><div style="height:8px;border-radius:4px;background:var(--accent);width:' + Math.round(100 * (total - all) / total) + '%"></div></div>' +
+    '<div class="muted" style="margin-top:6px">' + (total - all) + ' of ' + total + ' done · progress is saved</div></div>';
+  h += '<div class="btns three">' + PILES.map(([k, l]) => '<button class="chip" style="min-height:48px;border-radius:10px" data-act="imppile" data-v="' + k + '" aria-pressed="' + (IMP_PILE === k) + '">' + l + '<br>' + impPending(k).length + '</button>').join('') + '</div>';
+  const d = impPending(IMP_PILE)[0];
+  if (!d) {
+    h += '<div class="card empty">Nothing left in this pile.</div>';
+  } else {
+    const dupItem = d.dup && D.items[d.dup] && !D.items[d.dup].deleted ? D.items[d.dup] : null;
+    h += '<form class="card pad form" data-form="draft" data-id="' + d.id + '">';
+    h += '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span class="muted">From "' + esc(d.title) + '"</span>' +
+      (dupItem ? '<span class="badge b-soon">Possible duplicate</span>' : '') + '</div>';
+    if (d.files.length) h += '<div class="files">' + d.files.map((f) => /^image\//.test(f.mime) ? '<img class="thumb" style="width:100%;height:auto;aspect-ratio:3/4" data-thumb="' + f.id + '" alt="Attachment">' : '<div class="thumb" style="width:100%;height:auto;aspect-ratio:3/4">' + esc(f.mime === 'application/pdf' ? 'PDF' : 'File') + '</div>').join('') + '</div>';
+    if (dupItem) h += '<div class="warn">Looks like <a href="#/item/' + dupItem.id + '">' + esc(dupItem.name) + '</a>, already in Our Gear. Merge adds these files and notes to it.</div>';
+    h += '<label class="field req"><span>Item name</span><input name="name" value="' + esc(d.title) + '" required></label>';
+    h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(d.date || '') + '"></label>' +
+      '<label class="field"><span>Price (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(d.total) + '"></label></div>';
+    h += '<label class="field"><span>Store</span><input name="store" value="' + esc(d.store || '') + '"></label>';
+    h += '<div class="grid2"><label class="field"><span>Category</span><select name="category">' + opt('', '', 'Choose…') + D.lists.categories.map((c) => opt(c, '')).join('') + '</select></label>' +
+      '<label class="field"><span>Warranty</span><select name="warranty">' + opt('', d.lifetime ? 'lifetime' : '', 'None or unknown') + opt('lifetime', d.lifetime ? 'lifetime' : '', 'Lifetime') +
+      [1, 2, 3, 5, 7, 10, 25].map((y) => opt(String(y), '', y + ' year' + (y > 1 ? 's' : ''))).join('') + '</select></label></div>';
+    h += '<div class="grid2"><label class="field"><span>Property</span><select name="propertyId">' + D.lists.properties.map((p) => opt(p.id, IMP.lastProp || D.lists.properties[0].id, p.name)).join('') + '</select></label>' +
+      '<label class="field"><span>Location</span><input name="location" list="locs2"></label></div><datalist id="locs2">' + D.lists.locations.map((l) => '<option value="' + esc(l) + '">').join('') + '</datalist>';
+    if (d.text) h += '<details><summary class="muted">Note text</summary><div style="white-space:pre-line;font-size:13px;margin-top:6px">' + esc(d.text.slice(0, 2000)) + '</div></details>';
+    if (d.files.some((f) => /^image\//.test(f.mime))) h += '<button class="btn quiet" type="button" data-act="impocr" data-id="' + d.id + '">Read receipt</button>';
+    h += '<div class="btns three"><button class="btn quiet" type="submit" name="act" value="skip">Skip</button><button class="btn" type="submit" name="act" value="merge">Merge</button>' +
+      '<button class="btn primary" type="submit" name="act" value="accept">Accept</button></div></form>';
+  }
+  if (IMP_PILE === 'old' && impPending('old').length) {
+    const n = impPending('old').length;
+    h += '<button class="btn" data-act="impoldall">Import all ' + n + ' older as archived</button><button class="btn quiet" data-act="impskipold">Skip all ' + n + ' older</button>' +
+      '<p class="muted">Archived items keep their receipts in Dropbox and stay searchable.</p>';
+  }
+  h += '<button class="btn danger" data-act="impclear">Cancel import</button>';
+  return h + '</main>' + nav('settings');
+}
 /* ---------- routing ---------- */
 function render() {
   const app = $('#app'); if (!app || !D) return;
@@ -923,6 +1276,7 @@ function render() {
     case 'snap': html = viewSnap(); break;
     case 'settings': html = viewSettings(); break;
     case 'suggest': html = viewSuggest(); break;
+    case 'import': html = viewImport(); break;
     default: html = viewHome();
   }
   app.innerHTML = html;
@@ -986,13 +1340,17 @@ const ACT = {
   openfile(el) { openFile(D.files[el.dataset.id]); },
   picker(el) { openPicker(el.dataset.id); },
   async pick(el) {
-    const f = D.files[el.dataset.file]; f.itemId = el.dataset.id; touch(f);
+    const f = D.files[el.dataset.file];
+    groupFiles(f).forEach((g) => { g.itemId = el.dataset.id; touch(g); });
+    f.itemId = el.dataset.id; touch(f);
     await saveData(); closeSheet(); ITEM_TAB = 'files'; go('#/item/' + f.itemId); toast('Filed');
   },
   async unfile(el) { const f = D.files[el.dataset.id]; f.itemId = null; touch(f); await saveData(); closeSheet(); render(); toast('Moved to inbox'); },
   newfromfile(el) {
     const f = D.files[el.dataset.id];
-    NEW_ITEM_PREFILL = { store: f.store || '', purchaseDate: f.date || '', price: f.total || '', _fileId: f.id };
+    const grp = f.itemId ? [f] : groupFiles(f);
+    NEW_ITEM_PREFILL = { name: (f.title || '').slice(0, 80), notes: f.note || '', store: f.store || '', purchaseDate: f.date || '', price: f.total === undefined ? '' : f.total,
+      _fileIds: grp.map((x) => x.id), _lifetime: grp.some((x) => x.lifetime) };
     closeSheet(); go('#/new');
   },
   async delfile(el) {
@@ -1007,7 +1365,60 @@ const ACT = {
   async cropnext(el) {
     el.disabled = true; el.textContent = 'Working…';
     SNAP.result = await finishImage(SNAP.work, SNAP.crop, SNAP.docMode);
-    SNAP.step = 'details'; render();
+    SNAP.step = 'details'; SNAP.ocrMsg = ''; render();
+    if (S.autoRead) {
+      const mine = SNAP;
+      readReceipt(SNAP.result.full).then((r) => {
+        if (SNAP !== mine) return;
+        const n = fillEmpty(document.querySelector('form[data-form="snap"]'), r);
+        mine.ocrMsg = n ? 'Filled ' + n + ' detail' + (n > 1 ? 's' : '') + ' from the receipt. Check them before saving.' : 'Couldn\'t read the details. Type them in.';
+        const m = $('#ocrmsg'); if (m) m.textContent = mine.ocrMsg;
+      }).catch(() => { mine.ocrMsg = 'Receipt reading isn\'t available right now. Type the details in.'; const m = $('#ocrmsg'); if (m) m.textContent = mine.ocrMsg; });
+    }
+  },
+  async readfile(el) {
+    const f = D.files[el.dataset.id];
+    el.disabled = true; el.textContent = 'Reading…';
+    try {
+      let blob = await idb.get('blobs', f.id);
+      if (!blob && f.uploaded) { const r = await DBX.download(f.path); blob = r && r.blob; }
+      if (!blob) throw new Error('file not available offline');
+      const r = await readReceipt(blob);
+      const n = fillEmpty(document.querySelector('form[data-form="file"]'), r);
+      toast(n ? 'Filled ' + n + ' detail' + (n > 1 ? 's' : '') + '. Check, then Save changes.' : 'Couldn\'t read the details');
+    } catch (e) { toast('Could not read: ' + e.message.slice(0, 80)); }
+    el.disabled = false; el.textContent = 'Read receipt';
+  },
+  autoread(el) { S.autoRead = el.checked; saveSettings(); },
+  imppile(el) { IMP_PILE = el.dataset.v; render(); },
+  async impocr(el) {
+    const d = IMP.drafts[el.dataset.id], img = d.files.find((x) => /^image\//.test(x.mime));
+    el.disabled = true; el.textContent = 'Reading…';
+    try {
+      const r = await readReceipt(await idb.get('blobs', img.id));
+      const form = document.querySelector('form[data-form="draft"]');
+      [['store', r.store], ['date', r.date], ['total', r.total]].forEach(([k, v]) => { const i = form.querySelector('[name="' + k + '"]'); if (i && !i.value && v !== '') i.value = v; });
+      if (r.lifetime) form.querySelector('[name="warranty"]').value = 'lifetime';
+      toast('Read. Check the details.');
+    } catch (e) { toast('Could not read: ' + e.message.slice(0, 80)); }
+    el.disabled = false; el.textContent = 'Read receipt';
+  },
+  async impoldall(el) {
+    const ds = impPending('old');
+    if (!confirm('Import all ' + ds.length + ' older notes as archived items?')) return;
+    el.disabled = true;
+    ds.forEach((d) => acceptDraft(d, { name: d.title, date: d.date, total: d.total, store: d.store, propertyId: IMP.lastProp }, true));
+    await saveImport(); await saveData(); toast(ds.length + ' imported to the archive'); render();
+  },
+  async impskipold() {
+    const ds = impPending('old');
+    if (!confirm('Skip all ' + ds.length + ' older notes? Their attachments are not imported.')) return;
+    for (const d of ds) { d.status = 'skipped'; for (const f of d.files) { await idb.del('blobs', f.id); await dropThumb(f.id); } }
+    await saveImport(); render();
+  },
+  async impclear() {
+    if (!confirm('Cancel the import? Notes not yet accepted are dropped. Items already added stay.')) return;
+    await clearImport(); render();
   },
   dbxon() { DBX.connect(); },
   dbxoff() { if (confirm('Disconnect Dropbox on this phone? Your records stay on the phone and in Dropbox.')) { DBX.disconnect(); render(); } },
@@ -1055,6 +1466,8 @@ document.addEventListener('change', async (e) => {
   if (t.id === 'ownerSel') { S.owner = t.value; saveSettings(); toast('Saved'); return; }
   if (t.id === 'deg') { SNAP.deg = +t.value; rebuildWork(); drawCropView(); return; }
   if (t.id === 'restoreIn') { restoreBackup(t.files && t.files[0]); return; }
+  if (t.id === 'enexIn') { const f = t.files && t.files[0]; if (f && !/\.enex$/i.test(f.name)) { toast('That isn\'t an .enex file'); return; } startEnex(f); return; }
+  if (t.dataset && t.dataset.act === 'autoread') { ACT.autoread(t); return; }
   if (t.closest && t.closest('[data-form="warranty"]')) warrantyPreview();
 });
 document.addEventListener('input', (e) => {
@@ -1080,8 +1493,13 @@ document.addEventListener('submit', async (e) => {
     it.replacementValue = v('replacementValue') === '' ? '' : +v('replacementValue');
     it.work = fd.get('work') === 'on';
     D.items[it.id] = touch(it);
-    if (!id && NEW_ITEM_PREFILL && NEW_ITEM_PREFILL._fileId && D.files[NEW_ITEM_PREFILL._fileId]) {
-      const f = D.files[NEW_ITEM_PREFILL._fileId]; f.itemId = it.id; touch(f);
+    if (!id && NEW_ITEM_PREFILL) {
+      (NEW_ITEM_PREFILL._fileIds || []).forEach((fid) => { const f = D.files[fid]; if (f) { f.itemId = it.id; touch(f); } });
+      if (NEW_ITEM_PREFILL._lifetime) {
+        const w = touch({ id: uid(), itemId: it.id, createdAt: Date.now(), type: 'Maker', covers: '', termUnit: 'lifetime', termValue: '', startFrom: 'purchase',
+          startDate: '', expiryOverride: '', provider: '', contact: '', conditions: '' });
+        D.warranties[w.id] = w;
+      }
     }
     NEW_ITEM_PREFILL = null;
     await saveData(); toast(id ? 'Saved' : 'Item added');
@@ -1115,6 +1533,21 @@ document.addEventListener('submit', async (e) => {
     const f = D.files[form.dataset.id];
     f.kind = v('kind'); f.date = v('date'); f.store = v('store'); f.total = v('total') === '' ? '' : +v('total');
     touch(f); await saveData(); closeSheet(); render(); toast('Saved');
+  } else if (kind === 'draft') {
+    const d = IMP.drafts[form.dataset.id], act = e.submitter ? e.submitter.value : 'accept';
+    if (act === 'skip') {
+      d.status = 'skipped';
+      for (const f of d.files) { await idb.del('blobs', f.id); await dropThumb(f.id); }
+      await saveImport(); render(); return;
+    }
+    const vals = { name: v('name'), date: v('date'), total: v('total'), store: v('store'), category: v('category'), warranty: v('warranty'), propertyId: v('propertyId'), location: v('location') };
+    IMP.lastProp = vals.propertyId;
+    if (act === 'merge') {
+      openMergePicker(d.id, vals); return;
+    }
+    if (!vals.name) { toast('Give the item a name'); return; }
+    acceptDraft(d, vals, false);
+    await saveImport(); await saveData(); toast('Added'); render();
   } else if (kind === 'prop') {
     const id = form.dataset.id;
     if (!v('name')) return;
@@ -1158,26 +1591,21 @@ function applyTheme() {
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = { midnight: '#0B1220', indigo: '#FFFFFF', slate: '#1E293B', ink: '#0F2A2E' }[S.theme] || '#FFFFFF';
 }
-/* Files shared to Our Gear from other apps land in the inbox. */
-async function importShared() {
-  const keys = await idb.keys('share');
-  if (!keys.length) return;
-  let n = 0;
-  for (const k of keys) {
-    const s = await idb.get('share', k);
-    try {
-      const isPdf = s.type === 'application/pdf' || /\.pdf$/i.test(s.name);
-      let full = s.blob, thumb = null;
-      if (!isPdf && /^image\//.test(s.type)) { const r = await quickCompress(s.blob); full = r.full; thumb = r.thumb; }
-      else if (!isPdf) continue;
-      const f = touch({ id: uid(), itemId: null, kind: isPdf ? 'Tax invoice' : 'Receipt', date: todayISO(), store: '', total: '',
-        mime: isPdf ? 'application/pdf' : 'image/jpeg', origName: s.name, size: full.size, uploaded: false, path: null, createdAt: Date.now() });
-      await idb.put('blobs', f.id, full); if (thumb) await idb.put('thumbs', f.id, thumb);
-      D.files[f.id] = f; n++;
-    } finally { await idb.del('share', k); }
-  }
-  if (n) { await saveData(); toast(n + ' file' + (n > 1 ? 's' : '') + ' added to inbox'); }
+function openMergePicker(draftId, vals) {
+  const rows = live('items').filter((i) => !i.archived).sort((a, b) => a.name.localeCompare(b.name));
+  const d = IMP.drafts[draftId];
+  openSheet(sheetHead('Merge into…') + '<div class="card list">' + (d.dup && D.items[d.dup] ? '<button class="row" data-act="impmerge" data-draft="' + draftId + '" data-id="' + d.dup + '"><div class="grow"><div class="t">' + esc(D.items[d.dup].name) + '</div><div class="s">Suggested match</div></div></button>' : '') +
+    rows.map((i) => '<button class="row" data-act="impmerge" data-draft="' + draftId + '" data-id="' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' + esc(propName(i.propertyId)) + '</div></div></button>').join('') + '</div>');
+  MERGE_VALS = vals;
 }
+let MERGE_VALS = null;
+ACT.impmerge = async (el) => {
+  const d = IMP.drafts[el.dataset.draft], it = D.items[el.dataset.id], vals = MERGE_VALS || {};
+  draftFileRecs(Object.assign({}, d, { date: vals.date || d.date, store: vals.store || d.store, total: vals.total === undefined ? d.total : vals.total }), it.id).forEach((f) => { D.files[f.id] = f; });
+  it.notes = (it.notes ? it.notes + '\n\n' : '') + d.text + '\n(Merged from ' + IMP.source + ' note "' + d.title + '")';
+  touch(it); d.status = 'accepted'; d.itemId = it.id;
+  await saveImport(); await saveData(); closeSheet(); toast('Merged into ' + it.name); render();
+};
 
 /* ---------- start ---------- */
 async function boot() {
@@ -1188,6 +1616,7 @@ async function boot() {
   if (!D.lists) D.lists = JSON.parse(JSON.stringify(DEFAULT_LISTS));
   const signedIn = await DBX.finishSignIn().catch((e) => { toast('Sign-in error: ' + e.message); return true; });
   if (location.search.includes('share=1')) history.replaceState(null, '', location.pathname + '#/inbox');
+  await loadImport().catch(() => {});
   await importShared().catch(() => {});
   render();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
