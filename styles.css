@@ -4,6 +4,32 @@
   --accent: #4F46E5; --accent-ink: #FFFFFF; --accent-text: #4F46E5; --accent-soft: #EEF2FF; --accent-soft-ink: #4338CA;
   --hdr-bg: #FFFFFF; --hdr-text: #111827; --hdr-muted: #6B7280; --hdr-line: #E5E7EB; --logo-fg: #4F46E5;
 }
+[data-theme="emerald"] {
+  --accent: #059669; --accent-ink: #FFFFFF; --accent-text: #047857; --accent-soft: #E7F8F1; --accent-soft-ink: #047857;
+  --hdr-bg: #111827; --hdr-text: #FFFFFF; --hdr-muted: #A7B0BE; --hdr-line: #111827; --logo-fg: #34D399;
+}
+[data-theme="sky"] {
+  --accent: #0284C7; --accent-ink: #FFFFFF; --accent-text: #0369A1; --accent-soft: #E7F5FC; --accent-soft-ink: #0369A1;
+  --hdr-bg: #FFFFFF; --hdr-text: #111827; --hdr-muted: #6B7280; --hdr-line: #E5E7EB; --logo-fg: #0284C7;
+}
+[data-theme="plum"] {
+  --accent: #7E22CE; --accent-ink: #FFFFFF; --accent-text: #7E22CE; --accent-soft: #F5ECFC; --accent-soft-ink: #6B21A8;
+  --hdr-bg: #3B0764; --hdr-text: #FFFFFF; --hdr-muted: #D8C4EC; --hdr-line: #3B0764; --logo-fg: #D8B4FE;
+}
+[data-theme="sand"] {
+  --accent: #D97706; --accent-ink: #1C1917; --accent-text: #B45309; --accent-soft: #FDF3E3; --accent-soft-ink: #92400E;
+  --hdr-bg: #44403C; --hdr-text: #FFFFFF; --hdr-muted: #D6D3D1; --hdr-line: #44403C; --logo-fg: #FBBF24;
+}
+[data-theme="night"] {
+  --bg: #0B1220; --surface: #131C2E; --text: #E5E7EB; --muted: #9CA3AF; --border: #1F2A3D; --field: #334155;
+  --accent: #60A5FA; --accent-ink: #0B1220; --accent-text: #93C5FD; --accent-soft: #1B2A44; --accent-soft-ink: #BFDBFE;
+  --hdr-bg: #0B1220; --hdr-text: #F3F4F6; --hdr-muted: #9CA3AF; --hdr-line: #1F2A3D; --logo-fg: #60A5FA;
+}
+[data-theme="night"] { color-scheme: dark; }
+[data-theme="night"] .stat .n[style] { color: #FBBF24 !important; }
+[data-theme="night"] .thumb, [data-theme="night"] .inbox-grid img, [data-theme="night"] .tilepic img, [data-theme="night"] .pickfiles img { background: #1F2A3D; }
+[data-theme="night"] .b-none, [data-theme="night"] .b-nowar, [data-theme="night"] .b-arch { background: #273449; color: #D1D5DB; }
+[data-theme="night"] .warn { background: #3A2A0A; color: #FCD34D; }
 [data-theme="midnight"] {
   --accent: #2F6BFF; --accent-ink: #FFFFFF; --accent-text: #1D4ED8; --accent-soft: #E8EEFF; --accent-soft-ink: #1D4ED8;
   --hdr-bg: #0B1220; --hdr-text: #FFFFFF; --hdr-muted: #A8B3C7; --hdr-line: #0B1220; --logo-fg: #5B8CFF;
@@ -164,3 +190,7 @@ button.stat { text-align: left; cursor: pointer; font: inherit; color: var(--tex
 .typechoice { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .typebtn { min-height: 76px; border-radius: 12px; border: 1.5px solid var(--field); background: var(--surface); color: var(--text); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-weight: 600; font-size: 13.5px; cursor: pointer; padding: 8px; text-align: center; }
 .typebtn[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-soft-ink); }
+
+/* v1.06: item count on Home */
+.statwide { display: flex; justify-content: space-between; align-items: center; }
+.statwide .n { font-size: 24px; }

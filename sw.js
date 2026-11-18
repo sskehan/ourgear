@@ -1,5 +1,5 @@
 /* Our Gear service worker. Bump CACHE with every release. */
-const CACHE = 'ourgear-1.05';
+const CACHE = 'ourgear-1.06';
 const SHELL = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest',
   './icon.svg', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 

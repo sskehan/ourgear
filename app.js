@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.05';
+const APP_VERSION = '1.06';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -14,10 +14,15 @@ function kindGroup(k) { return RECEIPT_KINDS.includes(k) ? 'receipt' : PHOTO_KIN
 const SNAP_TYPES = [['receipt', 'Receipt or invoice', 'Receipt'], ['photo', 'Item photo', 'Photo'], ['doc', 'Other document', 'Warranty card']];
 const ITEM_STATUS = ['Active', 'Sold', 'Disposed', 'Replaced'];
 const THEMES = [
-  { id: 'midnight', name: 'Midnight and blue', a: '#0B1220', b: '#2F6BFF' },
   { id: 'indigo', name: 'Clean white and indigo', a: '#FFFFFF', b: '#4F46E5' },
+  { id: 'midnight', name: 'Midnight and blue', a: '#0B1220', b: '#2F6BFF' },
   { id: 'slate', name: 'Slate and signal orange', a: '#1E293B', b: '#F97316' },
-  { id: 'ink', name: 'Deep ink and teal', a: '#0F2A2E', b: '#14B8A6' }
+  { id: 'ink', name: 'Deep ink and teal', a: '#0F2A2E', b: '#14B8A6' },
+  { id: 'emerald', name: 'Graphite and emerald', a: '#111827', b: '#10B981' },
+  { id: 'sky', name: 'Clean white and sky', a: '#FFFFFF', b: '#0284C7' },
+  { id: 'plum', name: 'Plum and violet', a: '#3B0764', b: '#7E22CE' },
+  { id: 'sand', name: 'Stone and amber', a: '#44403C', b: '#D97706' },
+  { id: 'night', name: 'Night (dark)', a: '#0B1220', b: '#60A5FA' }
 ];
 const DEFAULT_LISTS = {
   categories: ['Kitchen appliances', 'Laundry', 'Heating and cooling', 'Hot water', 'Solar and energy', 'Security and CCTV',
@@ -381,8 +386,14 @@ async function reconcileFiles() {
         continue;
       }
       let res;
-      try { res = await DBX.upload(want, blob, 'add'); }
-      catch (e) { if (/conflict/.test(e.summary)) res = { path_display: want }; else throw e; }
+      if (f.replace) {
+        res = await DBX.upload(want, blob, 'overwrite');
+        if (f.path && f.path.toLowerCase() !== want.toLowerCase()) { try { await DBX.del(f.path); } catch (e) { /* already gone */ } }
+        delete f.replace;
+      } else {
+        try { res = await DBX.upload(want, blob, 'add'); }
+        catch (e) { if (/conflict/.test(e.summary)) res = { path_display: want }; else throw e; }
+      }
       const th = await idb.get('thumbs', f.id);
       if (th) await DBX.upload(thumbPath(f.id), th, 'overwrite');
       f.path = res.path_display; f.uploaded = true; touch(f);
@@ -402,7 +413,17 @@ async function reconcileFiles() {
 
 /* ---------- thumbnails ---------- */
 const thumbUrls = {};
+function thumbRevs() { try { return JSON.parse(localStorage.getItem('og_trev') || '{}'); } catch (e) { return {}; } }
+function setThumbRev(id, rev) { const m = thumbRevs(); m[id] = rev; try { localStorage.setItem('og_trev', JSON.stringify(m)); } catch (e) { /* full */ } }
 async function thumbUrl(f) {
+  if (f.imgRev && thumbRevs()[f.id] !== f.imgRev && f.uploaded && !(await idb.get('blobs', f.id))) {
+    // edited on the other phone: drop the old preview and fetch the new one
+    if (thumbUrls[f.id]) { URL.revokeObjectURL(thumbUrls[f.id]); delete thumbUrls[f.id]; }
+    await idb.del('thumbs', f.id);
+    if (DBX.connected() && navigator.onLine) {
+      try { const r = await DBX.download(thumbPath(f.id)); if (r) { await idb.put('thumbs', f.id, r.blob); setThumbRev(f.id, f.imgRev); } } catch (e) { /* try later */ }
+    }
+  }
   if (thumbUrls[f.id]) return thumbUrls[f.id];
   let b = await idb.get('thumbs', f.id);
   if (!b && isPdfFile(f)) {
@@ -525,7 +546,7 @@ async function startSnap(file, itemId, type) {
 }
 function rebuildWork() {
   SNAP.work = rotateCanvas(SNAP.src, SNAP.quarter, SNAP.deg);
-  const m = Math.round(Math.min(SNAP.work.width, SNAP.work.height) * 0.04);
+  const m = SNAP.fullCrop ? 0 : Math.round(Math.min(SNAP.work.width, SNAP.work.height) * 0.04);
   SNAP.crop = { x: m, y: m, w: SNAP.work.width - 2 * m, h: SNAP.work.height - 2 * m };
 }
 function drawCropView() {
@@ -662,9 +683,10 @@ function viewHome() {
   let h = header('Our Gear', { logo: true, right: '<div class="sync" id="syncmsg">' + esc(syncLabel()) + '</div>' + syncButton() });
   h += '<main>';
   h += '<a class="btn primary big" href="#/snap">' + I.cam + 'Snap a receipt</a>';
+  h += '<a class="stat statwide" href="#/items"><div class="l">Items in Our Gear</div><div class="n">' + items.length + '</div></a>';
   h += '<div class="stats">' +
     '<a class="stat" href="#/inbox"><div class="l">Inbox to file</div><div class="n">' + inbox + '</div></a>' +
-    '<button class="stat" data-act="gofilter" data-v="soon"><div class="l">Expiring in 90 days</div><div class="n" style="color:#8A5A00">' + soon.length + '</div></button>' +
+    '<button class="stat" data-act="gofilter" data-k="st" data-v="soon"><div class="l">Expiring in 90 days</div><div class="n" style="color:#8A5A00">' + soon.length + '</div></button>' +
     '<a class="stat" href="#/claims"><div class="l">Open claims</div><div class="n">' + openClaims().length + '</div></a>' +
     '<a class="stat" href="#/service"><div class="l">Service due</div><div class="n">' + servicesDue().length + '</div></a></div>';
   h += '<section class="section"><div class="section-head"><h2>Expiring soon</h2></div>';
@@ -858,14 +880,15 @@ function viewSnap() {
     return h + nav('snap');
   }
   if (SNAP.step === 'crop') {
-    let h = header('Crop', { right: '<button class="iconbtn" data-act="snapcancel" aria-label="Cancel" style="font-size:14px;width:auto;padding:0 8px">Cancel</button>' });
+    let h = header(SNAP.editFileId ? 'Edit picture' : 'Crop', { right: '<button class="iconbtn" data-act="snapcancel" aria-label="Cancel" style="font-size:14px;width:auto;padding:0 8px">Cancel</button>' });
     h += '<main><div class="snapbody">' +
       '<div id="cropwrap" class="cropwrap"><canvas id="cropcanvas"></canvas><div id="croprect" class="croprect">' +
       '<span class="h tl" data-c="tl"></span><span class="h tr" data-c="tr"></span><span class="h bl" data-c="bl"></span><span class="h br" data-c="br"></span></div></div>' +
       '<div class="btns three"><button class="darkbtn" data-act="rot">Rotate</button><button class="darkbtn" data-act="cropall">Full photo</button>' +
       '<button class="darkbtn" data-act="docmode" aria-pressed="' + SNAP.docMode + '">' + (SNAP.docMode ? 'Black and white' : 'Colour') + '</button></div>' +
       '<label class="slider">Straighten<input id="deg" type="range" min="-15" max="15" step="0.5" value="' + SNAP.deg + '"><span id="degv">' + SNAP.deg + '°</span></label>' +
-      (kindGroup(SNAP.kind) === 'photo'
+      (SNAP.editFileId ? '<button class="btn primary big" data-act="editsave">Save changes</button><div class="muted" style="color:#D1D5DB">Black and white can\'t be turned back into colour later.</div>'
+        : kindGroup(SNAP.kind) === 'photo'
         ? (SNAP.itemId && D.items[SNAP.itemId] ? '<button class="btn primary big" data-act="photosave" data-v="item">Save photo</button>'
           : '<div class="btns"><button class="btn" data-act="photosave" data-v="inbox">Save to inbox</button><button class="btn primary" data-act="photosave" data-v="file">File to item</button></div>')
         : '<button class="btn primary big" data-act="cropnext">Next</button>') + '</div></main>';
@@ -945,6 +968,7 @@ function fileSheet(id) {
   h += '<div class="btns"><button class="btn primary" data-act="viewfile" data-id="' + id + '">View</button>' +
     ((f.mime === 'image/jpeg' || isPdfFile(f)) && kindGroup(f.kind) === 'receipt' ? '<button class="btn quiet" data-act="readfile" data-id="' + id + '">Read receipt</button>' : '<button class="btn quiet" data-act="openfile" data-id="' + id + '">Open in other app</button>') + '</div>';
   if (isPdfFile(f)) h += '<button class="btn" data-act="viewfile" data-id="' + id + '">Crop a receipt out of this PDF</button>';
+  if (/^image\//.test(f.mime || '')) h += '<button class="btn" data-act="editpic" data-id="' + id + '">Edit picture (crop, rotate, black and white)</button>';
   if (f.note) h += '<details><summary class="muted">Shared note text' + (f.lifetime ? ' (mentions lifetime)' : '') + '</summary><div style="white-space:pre-line;font-size:13px;margin-top:6px">' + esc(f.note.slice(0, 2000)) + '</div></details>';
   const grp = groupFiles(f).length;
   if (!it && grp > 1) h += '<div class="muted">Shared together with ' + (grp - 1) + ' other file' + (grp > 2 ? 's' : '') + '. Filing this one files them all.</div>';
@@ -2158,10 +2182,38 @@ const ACT = {
     const f = D.files[el.dataset.id]; f.deleted = true; touch(f); await dropThumb(f.id);
     await saveData(); closeSheet(); render(); toast('File deleted');
   },
-  snapcancel() { const t = SNAP_TARGET; SNAP = null; SNAP_TARGET = null; go(t ? '#/item/' + t : '#/home'); },
+  snapcancel() { const t = SNAP_TARGET, back = SNAP && SNAP.editFileId ? SNAP.back : null; SNAP = null; SNAP_TARGET = null; go(back || (t ? '#/item/' + t : '#/home')); },
   rot() { SNAP.quarter = (SNAP.quarter + 1) % 4; rebuildWork(); drawCropView(); },
   cropall() { SNAP.crop = { x: 0, y: 0, w: SNAP.work.width, h: SNAP.work.height }; placeCropRect(); },
   docmode(el) { SNAP.docMode = !SNAP.docMode; el.setAttribute('aria-pressed', SNAP.docMode); el.textContent = SNAP.docMode ? 'Black and white' : 'Colour'; },
+  async editpic(el) {
+    const f = D.files[el.dataset.id];
+    el.disabled = true; el.textContent = 'Opening picture…';
+    try {
+      const blob = await getFileBlob(f);
+      const src = await loadSource(blob);
+      const back = location.hash;
+      closeSheet();
+      SNAP = { step: 'crop', file: { name: f.origName || 'picture.jpg', type: 'image/jpeg' }, isPdf: false, quarter: 0, deg: 0, docMode: false, fullCrop: true,
+        itemId: f.itemId || null, kind: f.kind, src, editFileId: f.id, back };
+      rebuildWork();
+      if (location.hash === '#/snap') render(); else location.hash = '#/snap';
+    } catch (e) { toast('Could not open the picture: ' + e.message.slice(0, 80)); el.disabled = false; el.textContent = 'Edit picture (crop, rotate, black and white)'; }
+  },
+  async editsave(el) {
+    el.disabled = true; el.textContent = 'Saving…';
+    const f = D.files[SNAP.editFileId], back = SNAP.back || (f.itemId ? '#/item/' + f.itemId : '#/inbox');
+    const r = await finishImage(SNAP.work, SNAP.crop, SNAP.docMode);
+    await idb.put('blobs', f.id, r.full);
+    await dropThumb(f.id); await idb.put('thumbs', f.id, r.thumb);
+    if (f.uploaded) f.replace = true;
+    f.uploaded = false; f.size = r.full.size; f.imgRev = Date.now();
+    setThumbRev(f.id, f.imgRev);
+    touch(f); await saveData();
+    SNAP = null;
+    if (f.itemId) ITEM_TAB = 'files';
+    go(back.indexOf('#/snap') === 0 ? '#/home' : back); toast('Picture updated');
+  },
   snaptype(el) { SNAP_TYPE = el.dataset.v; render(); },
   async photosave(el) {
     document.querySelectorAll('[data-act="photosave"]').forEach((b) => { b.disabled = true; });
@@ -2232,7 +2284,12 @@ const ACT = {
   vext() { const f = VIEW && VIEW.f; closeViewer(); if (f) openFile(f); },
   vzoom(el) { if (!VIEW) return; VIEW.zoom = Math.min(3, Math.max(1, VIEW.zoom + (+el.dataset.v) * 0.5)); drawViewer(); },
   async vcrop(el) { el.disabled = true; el.textContent = 'Preparing page…'; try { await cropFromPdfPage(+el.dataset.v); } catch (e) { toast('Could not open that page: ' + e.message.slice(0, 80)); el.disabled = false; } },
-  gofilter(el) { ITEMS_F = Object.assign(ITEMS_F, { st: el.dataset.v, q: '', prop: 'all', cat: '', arch: false, owner: '' }); go('#/items'); },
+  gofilter(el) {
+    ITEMS_F = Object.assign(ITEMS_F, { st: 'all', q: '', prop: 'all', cat: '', arch: false, owner: '' });
+    const k = el.dataset.k || 'st', v = el.dataset.v;
+    if (k === 'st') ITEMS_F.st = v; else if (k === 'prop') ITEMS_F.prop = v || 'all'; else if (k === 'owner') ITEMS_F.owner = v; else if (k === 'cat') ITEMS_F.cat = v;
+    go('#/items');
+  },
   async faultreport(el) {
     const c = D.claims[el.dataset.id], it = D.items[c.itemId];
     el.disabled = true; const was = el.innerHTML; el.textContent = 'Making report…';
