@@ -1,12 +1,12 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.01';
+const APP_VERSION = '1.03';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Shared'];
 const PROPERTY_TYPES = ['Main residence', 'Investment', 'Holiday home', 'Other'];
-const FILE_KINDS = ['Receipt', 'Tax invoice', 'Warranty card', 'Manual', 'Photo', 'Serial plate', 'Certificate', 'Other'];
+const FILE_KINDS = ['Receipt', 'Tax invoice', 'Warranty card', 'Manual', 'Photo', 'Serial plate', 'Certificate', 'Claim pack', 'Other'];
 const ITEM_STATUS = ['Active', 'Sold', 'Disposed', 'Replaced'];
 const THEMES = [
   { id: 'midnight', name: 'Midnight and blue', a: '#0B1220', b: '#2F6BFF' },
@@ -77,12 +77,13 @@ function safeName(s, max) {
 let D = null;          // synced data
 let S = null;          // this phone's settings
 function emptyData() {
-  return { schema: 1, items: {}, warranties: {}, files: {}, lists: JSON.parse(JSON.stringify(DEFAULT_LISTS)) };
+  return { schema: 1, items: {}, warranties: {}, files: {}, claims: {}, logs: {}, services: {}, lists: JSON.parse(JSON.stringify(DEFAULT_LISTS)) };
 }
 function defaultSettings() {
   return { theme: 'indigo', wifiOnly: true, autoRead: true, owner: 'Shaun', lastSync: 0, lastSyncMsg: '' };
 }
-function live(coll) { return Object.values(D[coll]).filter((r) => !r.deleted); }
+function live(coll) { return Object.values(D[coll] || {}).filter((r) => !r.deleted); }
+const COLLECTIONS = ['items', 'warranties', 'files', 'claims', 'logs', 'services'];
 function touch(rec) { rec.updatedAt = Date.now(); rec.by = S ? S.owner : ''; return rec; }
 function itemWarranties(itemId) { return live('warranties').filter((w) => w.itemId === itemId); }
 function itemFiles(itemId) { return live('files').filter((f) => f.itemId === itemId); }
@@ -93,7 +94,8 @@ function propName(id) { const p = propById(id); return p ? p.name : 'No property
 /* Merge another copy of the data into ours: newest record wins, by id. */
 function mergeInto(local, remote) {
   let changed = false;
-  ['items', 'warranties', 'files'].forEach((c) => {
+  COLLECTIONS.forEach((c) => {
+    if (!local[c]) local[c] = {};
     const L = local[c], R = (remote && remote[c]) || {};
     Object.keys(R).forEach((id) => {
       if (!L[id] || (R[id].updatedAt || 0) > (L[id].updatedAt || 0)) { L[id] = R[id]; changed = true; }
@@ -306,6 +308,12 @@ function syncLabel() {
   const mins = Math.round((Date.now() - S.lastSync) / 60000);
   return mins < 1 ? 'Synced just now' : mins < 60 ? 'Synced ' + mins + ' min ago' : 'Synced ' + new Date(S.lastSync).toLocaleString('en-AU', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 }
+/* Same data always gives the same text, whatever order records were added in. */
+function stableStringify(v) {
+  if (Array.isArray(v)) return '[' + v.map(stableStringify).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
+  return JSON.stringify(v === undefined ? null : v);
+}
 async function sync(manual) {
   if (!DBX.connected() || !navigator.onLine) { if (manual) toast(navigator.onLine ? 'Connect Dropbox in Settings first' : 'No internet connection'); return; }
   if (!manual && S.wifiOnly && onCellular()) return;
@@ -316,14 +324,15 @@ async function sync(manual) {
       const remote = await DBX.download(DATA_PATH);
       let remoteText = null, rev = null;
       if (remote) {
-        remoteText = await remote.blob.text(); rev = remote.meta.rev;
-        const rd = JSON.parse(remoteText);
+        rev = remote.meta.rev;
+        const rd = JSON.parse(await remote.blob.text());
+        remoteText = stableStringify(rd);
         if (mergeInto(D, rd)) await idb.put('kv', 'data', D);
       }
       await reconcileFiles();
       await idb.put('kv', 'data', D);
-      const text = JSON.stringify(D);
-      if (text === remoteText) break;
+      const text = stableStringify(D);
+      if (text === remoteText) break; // nothing new to send
       try {
         await DBX.upload(DATA_PATH, new Blob([text], { type: 'application/json' }), rev ? { '.tag': 'update', update: rev } : { '.tag': 'add' });
         break;
@@ -358,13 +367,18 @@ async function reconcileFiles() {
     const want = desiredPath(f);
     if (!f.uploaded) {
       const blob = await idb.get('blobs', f.id);
-      if (!blob) continue; // added on the other phone; it will upload it
+      if (!blob) {
+        // Added on the other phone (it will upload it), or uploaded here just before the app was closed.
+        if (f.by === S.owner && await DBX.exists(want)) { f.path = want; f.uploaded = true; touch(f); }
+        continue;
+      }
       let res;
       try { res = await DBX.upload(want, blob, 'add'); }
       catch (e) { if (/conflict/.test(e.summary)) res = { path_display: want }; else throw e; }
       const th = await idb.get('thumbs', f.id);
       if (th) await DBX.upload(thumbPath(f.id), th, 'overwrite');
       f.path = res.path_display; f.uploaded = true; touch(f);
+      await idb.put('kv', 'data', D); // record the upload before dropping the local copy
       await idb.del('blobs', f.id);
       continue;
     }
@@ -383,10 +397,19 @@ const thumbUrls = {};
 async function thumbUrl(f) {
   if (thumbUrls[f.id]) return thumbUrls[f.id];
   let b = await idb.get('thumbs', f.id);
-  if (!b && f.uploaded && f.mime !== 'application/pdf' && DBX.connected() && navigator.onLine) {
+  if (!b && isPdfFile(f)) {
+    const local = await idb.get('blobs', f.id);
+    if (local) { try { b = await pdfThumbBlob(local); await idb.put('thumbs', f.id, b); } catch (e) { /* unreadable PDF */ } }
+  }
+  if (!b && f.uploaded && DBX.connected() && navigator.onLine) {
     const item = f.itemId && D.items[f.itemId];
     if (item && item.archived) return null;
-    try { const r = await DBX.download(thumbPath(f.id)); if (r) { b = r.blob; await idb.put('thumbs', f.id, b); } } catch (e) { /* offline */ }
+    try {
+      const r = await DBX.download(thumbPath(f.id));
+      if (r) b = r.blob;
+      else if (isPdfFile(f)) { const p = await DBX.download(f.path); if (p) b = await pdfThumbBlob(p.blob); }
+      if (b) await idb.put('thumbs', f.id, b);
+    } catch (e) { /* offline or unreadable */ }
   }
   if (!b) return null;
   thumbUrls[f.id] = URL.createObjectURL(b);
@@ -497,7 +520,9 @@ function rebuildWork() {
 function drawCropView() {
   const wrap = document.getElementById('cropwrap');
   if (!wrap || !SNAP || !SNAP.work) return;
-  const maxW = Math.min(wrap.parentElement.clientWidth, 600), maxH = Math.max(260, window.innerHeight - 330);
+  const ps = getComputedStyle(wrap.parentElement);
+  const avail = wrap.parentElement.clientWidth - parseFloat(ps.paddingLeft) - parseFloat(ps.paddingRight) - 16; // room for the corner handles
+  const maxW = Math.min(avail, 600), maxH = Math.max(260, window.innerHeight - 330);
   const s = Math.min(maxW / SNAP.work.width, maxH / SNAP.work.height);
   SNAP.view = s;
   const cv = document.getElementById('cropcanvas');
@@ -562,6 +587,7 @@ const I = {
   gear: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
   plus: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
   search: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>',
+  claim: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h9l3 3v15H6z"/><path d="M9 11h6M9 15h4"/></svg>',
   sync: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4M6 21v-4h4"/></svg>'
 };
 function logoSVG(size) {
@@ -593,7 +619,7 @@ function nav(active) {
   return '<nav class="nav">' + a('home', '#/home', I.home, 'Home') + a('items', '#/items', I.list, 'Items') +
     a('snap', '#/snap', '<span class="ring">' + I.cam + '</span>', 'Snap', 'snap') +
     '<a href="#/inbox"' + (active === 'inbox' ? ' aria-current="page"' : '') + '>' + I.inbox + 'Inbox' + (n ? '<span class="dot">' + n + '</span>' : '') + '</a>' +
-    a('settings', '#/settings', I.gear, 'Settings') + '</nav>';
+    a('claims', '#/claims', I.claim, 'Claims') + a('settings', '#/settings', I.gear, 'Settings') + '</nav>';
 }
 function syncButton() {
   return '<button class="iconbtn" data-act="syncnow" aria-label="Sync now">' + I.sync + '</button>';
@@ -622,8 +648,8 @@ function viewHome() {
   h += '<div class="stats">' +
     '<a class="stat" href="#/inbox"><div class="l">Inbox to file</div><div class="n">' + inbox + '</div></a>' +
     '<a class="stat" href="#/items"><div class="l">Expiring in 90 days</div><div class="n" style="color:#8A5A00">' + soon.length + '</div></a>' +
-    '<a class="stat" href="#/items"><div class="l">Items</div><div class="n">' + items.length + '</div></a>' +
-    '<a class="stat" href="#/items"><div class="l">Lifetime warranties</div><div class="n">' + life + '</div></a></div>';
+    '<a class="stat" href="#/claims"><div class="l">Open claims</div><div class="n">' + openClaims().length + '</div></a>' +
+    '<a class="stat" href="#/items"><div class="l">Service due</div><div class="n">' + servicesDue().length + '</div></a></div>';
   h += '<section class="section"><div class="section-head"><h2>Expiring soon</h2></div>';
   if (soon.length) {
     h += '<div class="card list">' + soon.slice(0, 6).map((x) =>
@@ -631,6 +657,11 @@ function viewHome() {
       esc((x.w.type || 'Warranty') + (x.w.covers ? ' (' + x.w.covers + ')' : '') + ' · ends ' + fmtDate(x.s.expiry)) + '</div></div>' + badge(x.s) + '</a>').join('') + '</div>';
   } else h += '<div class="card empty">Nothing expiring in the next 90 days.</div>';
   h += '</section>';
+  const oc = openClaims();
+  if (oc.length) h += '<section class="section"><div class="section-head"><h2>Open claims</h2><a href="#/claims">See all</a></div><div class="card list">' + oc.slice(0, 3).map((c) => claimRow(c, true)).join('') + '</div></section>';
+  const sd = servicesDue();
+  if (sd.length) h += '<section class="section"><h2>Service due</h2><div class="card list">' + sd.slice(0, 5).map((x) =>
+    '<a class="row" href="#/item/' + x.it.id + '"><div class="grow"><div class="t">' + esc(x.s.job) + '</div><div class="s">' + esc(x.it.name) + ' · ' + esc(fmtDate(x.st.next)) + '</div></div>' + badge(x.st) + '</a>').join('') + '</div></section>';
   if (sugg.length) {
     h += '<a class="card pad row" href="#/suggest" style="border-bottom:1px solid var(--border)"><div class="grow"><div class="t">' + sugg.length + ' item' + (sugg.length > 1 ? 's' : '') + ' could be archived</div>' +
       '<div class="s">Gone from the house, or warranties ended over 2 years ago</div></div><span class="badge b-arch">Review</span></a>';
@@ -652,10 +683,12 @@ function filteredItems() {
 }
 function itemsListHTML() {
   const rows = filteredItems();
+  const cnt = document.getElementById('itemcount');
+  if (cnt) cnt.textContent = rows.length + ' item' + (rows.length === 1 ? '' : 's');
   if (!rows.length) return '<div class="card empty">' + (live('items').length ? 'No items match.' : 'No items yet. Snap a receipt or tap + to add one.') + '</div>';
   return '<div class="card list">' + rows.map(({ i, st }) =>
     '<a class="row" href="#/item/' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
-    esc([i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : '')].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>';
+    esc([i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : ''), live('claims').some((c) => c.itemId === i.id && isOpenClaim(c)) ? 'claim open' : ''].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>';
 }
 function viewItems() {
   const props = D.lists.properties;
@@ -665,7 +698,7 @@ function viewItems() {
     props.map((p) => '<button class="chip" data-act="fprop" data-v="' + esc(p.id) + '" aria-pressed="' + (ITEMS_F.prop === p.id) + '">' + esc(p.name) + '</button>').join('') +
     '<button class="chip" data-act="farch" aria-pressed="' + ITEMS_F.arch + '">Include archived</button></div>';
   h += '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label>';
-  h += '<div id="itemlist">' + itemsListHTML() + '</div></main>';
+  h += '<div class="muted" id="itemcount"></div><div id="itemlist">' + itemsListHTML() + '</div></main>';
   return h + nav('items');
 }
 
@@ -673,7 +706,7 @@ function viewItem(id) {
   const it = D.items[id];
   if (!it || it.deleted) return header('Not found', { back: '#/items' }) + '<main><div class="card empty">This item was deleted.</div></main>' + nav('items');
   const p = propById(it.propertyId);
-  const tabs = '<div class="tabs" role="tablist">' + ['details', 'warranties', 'files'].map((t) =>
+  const tabs = '<div class="tabs" role="tablist">' + ['details', 'warranties', 'files', 'log'].map((t) =>
     '<button role="tab" data-act="tab" data-v="' + t + '" aria-selected="' + (ITEM_TAB === t) + '">' + t[0].toUpperCase() + t.slice(1) + '</button>').join('') + '</div>';
   let h = header(it.name, { back: '#/items', sub: [it.brand, it.model].filter(Boolean).join(' ') + (it.brand || it.model ? ' · ' : '') + propName(it.propertyId) + (it.location ? ', ' + it.location : ''), extra: tabs });
   h += '<main>';
@@ -685,6 +718,8 @@ function viewItem(id) {
       ['Replacement value', fmtMoney(it.replacementValue)], ['Status', it.status || 'Active'], ['Work deduction', it.work ? 'Yes' : ''], ['Notes', it.notes]]
       .filter((r) => r[1]);
     h += '<div class="card kv">' + kv.map((r) => '<div>' + esc(r[0]) + '</div><div style="white-space:pre-line">' + esc(r[1]) + '</div>').join('') + '</div>';
+    h += ourTaxHTML(it);
+    h += servicesHTML(it);
     h += '<div class="btns"><a class="btn primary" href="#/item/' + id + '/edit">Edit</a>' +
       (it.archived ? '<button class="btn" data-act="restore" data-id="' + id + '">Restore</button>' : '<button class="btn" data-act="archive" data-id="' + id + '">Archive</button>') + '</div>';
     h += '<button class="btn danger" data-act="delitem" data-id="' + id + '">Delete item</button>';
@@ -707,6 +742,8 @@ function viewItem(id) {
     if (sts.some((s) => s.kind === 'life') && !itemFiles(id).some((f) => f.kind === 'Receipt' || f.kind === 'Tax invoice'))
       h += '<div class="warn">Lifetime warranty with no receipt saved. A lifetime claim needs proof of purchase, so add the receipt.</div>';
     if (sts.some((s) => s.kind === 'gone')) h += '<div class="note">After a maker\'s warranty ends, Australian Consumer Law guarantees may still apply.</div>';
+  } else if (ITEM_TAB === 'log') {
+    h += itemLogTab(it);
   } else {
     const fs = itemFiles(id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     h += fs.length ? '<div class="inbox-grid">' + fs.map(fileTile).join('') + '</div>' : '<div class="card empty">No files yet.</div>';
@@ -715,7 +752,7 @@ function viewItem(id) {
   return h + '</main>' + nav('items');
 }
 function fileTile(f) {
-  const pic = f.mime === 'application/pdf' ? '<div class="ph">PDF</div>' : '<img data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
+  const pic = '<span class="tilepic"><img data-thumb="' + f.id + '" alt="">' + (isPdfFile(f) ? '<span class="pdftag">PDF</span>' : '') + '</span>';
   return '<button data-act="filesheet" data-id="' + f.id + '">' + pic + '<div class="cap">' + esc(f.kind) + '</div><div class="cap">' + esc(fmtDate(f.date) || 'No date') + (f.store ? ' · ' + esc(f.store) : '') + '</div></button>';
 }
 
@@ -805,8 +842,8 @@ function viewSnap() {
   }
   const it = SNAP.itemId && D.items[SNAP.itemId];
   let h = header('Details', { right: '<button class="iconbtn" data-act="snapcancel" aria-label="Cancel" style="font-size:14px;width:auto;padding:0 8px">Cancel</button>', sub: it ? 'For ' + it.name : '' });
-  h += '<main>' + (SNAP.isPdf ? '<div class="card empty">PDF: ' + esc(SNAP.file.name || 'document') + '</div>' : '<img class="preview" id="snapprev" alt="Cropped image">');
-  if (!SNAP.isPdf && S.autoRead) h += '<div class="muted" id="ocrmsg">' + esc(SNAP.ocrMsg || 'Reading receipt…') + '</div>';
+  h += '<main><img class="preview" id="snapprev" alt="' + (SNAP.isPdf ? 'First page of the PDF' : 'Cropped image') + '">';
+  if (S.autoRead) h += '<div class="muted" id="ocrmsg">' + esc(SNAP.ocrMsg || (SNAP.isPdf ? 'Reading the PDF…' : 'Reading receipt…')) + '</div>';
   h += '<form class="form" data-form="snap">';
   h += '<label class="field"><span>What is it?</span><select name="kind">' + FILE_KINDS.map((k) => opt(k, SNAP.kind)).join('') + '</select></label>';
   h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(SNAP.date) + '"></label>' +
@@ -814,6 +851,8 @@ function viewSnap() {
   h += '<label class="field"><span>Store</span><input name="store" value="' + esc(SNAP.store) + '"></label>';
   h += it ? '<button class="btn primary big" type="submit" name="dest" value="item">Save to ' + esc(it.name) + '</button>'
     : '<div class="btns"><button class="btn" type="submit" name="dest" value="inbox">Save to inbox</button><button class="btn primary" type="submit" name="dest" value="file">File to item</button></div>';
+  if (SNAP.isPdf) h += '<button class="btn quiet" type="submit" name="dest" value="crop">Save, then crop a receipt out of it</button>';
+  if (SNAP.fromFile) h += '<div class="muted">Cut from a PDF. The full PDF stays saved alongside it.</div>';
   h += '</form></main>';
   return h + nav('snap');
 }
@@ -855,6 +894,7 @@ function viewSettings() {
     [['categories', 'Categories'], ['locations', 'Locations'], ['warrantyTypes', 'Warranty types']].map((x) =>
       '<label class="field"><span>' + x[1] + ' (one per line)</span><textarea id="list-' + x[0] + '" rows="5">' + esc(D.lists[x[0]].join('\n')) + '</textarea></label>').join('') +
     '<button class="btn primary" data-act="savelists">Save lists</button></div></section>';
+  h += '<section class="section"><h2>Reports</h2><div class="card pad form"><a class="btn" href="#/reports">Insurance inventory</a><div class="muted">Contents list by property and room, with values, as a PDF or spreadsheet.</div></div></section>';
   h += '<section class="section"><h2>Import</h2><div class="card pad form"><div class="muted">Bring in old receipts from Evernote, or share notes from OneNote.</div><a class="btn" href="#/import">Import from Evernote</a>' +
     '<label class="check"><input type="checkbox" data-act="autoread"' + (S.autoRead ? ' checked' : '') + '> Read receipts automatically after cropping</label>' +
     '<div class="muted">Reading happens on this phone. The first time, it downloads about 7 MB, then works offline.</div></div></section>';
@@ -874,8 +914,10 @@ function fileSheet(id) {
   const f = D.files[id]; if (!f) return;
   const it = f.itemId && D.items[f.itemId] && !D.items[f.itemId].deleted ? D.items[f.itemId] : null;
   let h = sheetHead(f.kind || 'File');
-  h += f.mime === 'application/pdf' ? '<div class="card empty">PDF document</div>' : '<img class="preview" data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
-  h += '<div class="btns"><button class="btn" data-act="openfile" data-id="' + id + '">Open full file</button>' + (f.mime === 'image/jpeg' ? '<button class="btn quiet" data-act="readfile" data-id="' + id + '">Read receipt</button>' : '<span></span>') + '</div>';
+  h += '<img class="preview" data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
+  h += '<div class="btns"><button class="btn primary" data-act="viewfile" data-id="' + id + '">View</button>' +
+    (f.mime === 'image/jpeg' || isPdfFile(f) ? '<button class="btn quiet" data-act="readfile" data-id="' + id + '">Read receipt</button>' : '<button class="btn quiet" data-act="openfile" data-id="' + id + '">Open in other app</button>') + '</div>';
+  if (isPdfFile(f)) h += '<button class="btn" data-act="viewfile" data-id="' + id + '">Crop a receipt out of this PDF</button>';
   if (f.note) h += '<details><summary class="muted">Shared note text' + (f.lifetime ? ' (mentions lifetime)' : '') + '</summary><div style="white-space:pre-line;font-size:13px;margin-top:6px">' + esc(f.note.slice(0, 2000)) + '</div></details>';
   const grp = groupFiles(f).length;
   if (!it && grp > 1) h += '<div class="muted">Shared together with ' + (grp - 1) + ' other file' + (grp > 2 ? 's' : '') + '. Filing this one files them all.</div>';
@@ -1047,10 +1089,14 @@ async function importShared() {
       for (const sf of batch.files) {
         const isPdf = sf.type === 'application/pdf' || /\.pdf$/i.test(sf.name || '');
         const isImg = /^image\//.test(sf.type || '');
-        let full = sf.blob, thumb = null;
+        let full = sf.blob, thumb = null, pp = {};
         if (isImg) { const r = await quickCompress(sf.blob); full = r.full; thumb = r.thumb; }
-        const f = touch({ id: uid(), itemId: null, kind: isPdf ? 'Tax invoice' : isImg ? 'Receipt' : 'Other', date: p.date || todayISO(), store: p.store || '',
-          total: p.total === undefined ? '' : p.total, mime: isImg ? 'image/jpeg' : (sf.type || 'application/octet-stream'), origName: sf.name || '',
+        if (isPdf) {
+          try { thumb = await pdfThumbBlob(sf.blob); } catch (e) { /* unreadable */ }
+          try { pp = await readPdf(sf.blob); } catch (e) { /* no text */ }
+        }
+        const f = touch({ id: uid(), itemId: null, kind: isPdf ? 'Tax invoice' : isImg ? 'Receipt' : 'Other', date: p.date || pp.date || todayISO(), store: p.store || pp.store || '',
+          total: p.total !== undefined && p.total !== '' ? p.total : (pp.total === undefined ? '' : pp.total), mime: isImg ? 'image/jpeg' : (sf.type || 'application/octet-stream'), origName: sf.name || '',
           size: full.size, uploaded: false, path: null, createdAt: Date.now(), groupId: gid, title: batch.title || '', note: text, lifetime: !!p.lifetime });
         await idb.put('blobs', f.id, full); if (thumb) await idb.put('thumbs', f.id, thumb);
         D.files[f.id] = f; n++;
@@ -1142,9 +1188,14 @@ async function draftFromNote(xml) {
     let outMime = mime, thumb = null;
     if (/^image\/(jpeg|png|gif|webp|bmp|heic|heif)/.test(mime)) {
       try { const c = await quickCompress(blob); blob = c.full; thumb = c.thumb; outMime = 'image/jpeg'; } catch (e) { /* keep original */ }
+    } else if (mime === 'application/pdf') {
+      try { thumb = await pdfThumbBlob(blob); } catch (e) { /* unreadable */ }
+      if (!d.date || d.date === created || d.total === '') {
+        try { const r = await readPdf(blob); if (r.date && (!d.date || d.date === created)) d.date = r.date; if (d.total === '' && r.total !== '') d.total = r.total; if (!d.store) d.store = r.store; } catch (e) { /* no text */ }
+      }
     }
     await idb.put('blobs', fid, blob); if (thumb) await idb.put('thumbs', fid, thumb);
-    d.files.push({ id: fid, mime: outMime, origName: name, size: blob.size });
+    d.files.push({ id: fid, mime: outMime, origName: name, size: blob.size, thumb: !!thumb });
   }
   d.pile = pileFor(d);
   d.dup = findDuplicate(d);
@@ -1163,7 +1214,7 @@ async function startEnex(file) {
       const d = await draftFromNote(note.xml);
       if (d) { IMP.drafts[d.id] = d; IMP.order.push(d.id); IMP.count++; }
       IMP.offset = note.endOffset;
-      if (++since >= 15) { since = 0; await saveImport(); }
+      if (++since >= 10 || IMP.count === 1) { since = 0; await saveImport(); }
       const el = $('#impprog'); if (el) el.textContent = IMP.count + ' notes read · ' + Math.round(100 * IMP_RUN.done / IMP_RUN.size) + '%';
     }
     IMP.done = true; await saveImport(); IMP_RUN = null;
@@ -1237,7 +1288,7 @@ function viewImport() {
     h += '<form class="card pad form" data-form="draft" data-id="' + d.id + '">';
     h += '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span class="muted">From "' + esc(d.title) + '"</span>' +
       (dupItem ? '<span class="badge b-soon">Possible duplicate</span>' : '') + '</div>';
-    if (d.files.length) h += '<div class="files">' + d.files.map((f) => /^image\//.test(f.mime) ? '<img class="thumb" style="width:100%;height:auto;aspect-ratio:3/4" data-thumb="' + f.id + '" alt="Attachment">' : '<div class="thumb" style="width:100%;height:auto;aspect-ratio:3/4">' + esc(f.mime === 'application/pdf' ? 'PDF' : 'File') + '</div>').join('') + '</div>';
+    if (d.files.length) h += '<div class="files">' + d.files.map((f) => f.thumb ? '<img class="thumb" style="width:100%;height:auto;aspect-ratio:3/4" data-thumb="' + f.id + '" alt="Attachment">' : '<div class="thumb" style="width:100%;height:auto;aspect-ratio:3/4">' + esc(f.mime === 'application/pdf' ? 'PDF' : 'File') + '</div>').join('') + '</div>';
     if (dupItem) h += '<div class="warn">Looks like <a href="#/item/' + dupItem.id + '">' + esc(dupItem.name) + '</a>, already in Our Gear. Merge adds these files and notes to it.</div>';
     h += '<label class="field req"><span>Item name</span><input name="name" value="' + esc(d.title) + '" required></label>';
     h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(d.date || '') + '"></label>' +
@@ -1249,7 +1300,7 @@ function viewImport() {
     h += '<div class="grid2"><label class="field"><span>Property</span><select name="propertyId">' + D.lists.properties.map((p) => opt(p.id, IMP.lastProp || D.lists.properties[0].id, p.name)).join('') + '</select></label>' +
       '<label class="field"><span>Location</span><input name="location" list="locs2"></label></div><datalist id="locs2">' + D.lists.locations.map((l) => '<option value="' + esc(l) + '">').join('') + '</datalist>';
     if (d.text) h += '<details><summary class="muted">Note text</summary><div style="white-space:pre-line;font-size:13px;margin-top:6px">' + esc(d.text.slice(0, 2000)) + '</div></details>';
-    if (d.files.some((f) => /^image\//.test(f.mime))) h += '<button class="btn quiet" type="button" data-act="impocr" data-id="' + d.id + '">Read receipt</button>';
+    if (d.files.some((f) => f.thumb)) h += '<button class="btn quiet" type="button" data-act="impocr" data-id="' + d.id + '">Read receipt</button>';
     h += '<div class="btns three"><button class="btn quiet" type="submit" name="act" value="skip">Skip</button><button class="btn" type="submit" name="act" value="merge">Merge</button>' +
       '<button class="btn primary" type="submit" name="act" value="accept">Accept</button></div></form>';
   }
@@ -1260,6 +1311,580 @@ function viewImport() {
   }
   h += '<button class="btn danger" data-act="impclear">Cancel import</button>';
   return h + '</main>' + nav('settings');
+}
+/* ---------- v1.02: PDFs (previews, viewer, reading, crop a receipt out of a page) ---------- */
+let pdfjsLib = null;
+const absUrl = (p) => new URL(p, location.href).href;
+async function getPdfjs() {
+  if (pdfjsLib) return pdfjsLib;
+  const m = await import(absUrl('pdf.min.mjs'));
+  m.GlobalWorkerOptions.workerSrc = absUrl('pdf.worker.min.mjs');
+  pdfjsLib = m;
+  return m;
+}
+function isPdfFile(f) { return f && (f.mime === 'application/pdf' || /\.pdf$/i.test(f.origName || f.name || '')); }
+async function openPdf(blob) {
+  const m = await getPdfjs();
+  const data = new Uint8Array(await blob.arrayBuffer());
+  const task = m.getDocument({ data, wasmUrl: absUrl('./'), isEvalSupported: false });
+  const pdf = await task.promise;
+  pdf._task = task;
+  return pdf;
+}
+function closePdf(pdf) {
+  try { if (pdf && pdf._task) pdf._task.destroy(); else if (pdf && typeof pdf.destroy === 'function') pdf.destroy(); } catch (e) { /* already closed */ }
+}
+async function renderPdfPage(pdf, n, width) {
+  const page = await pdf.getPage(n);
+  const vp1 = page.getViewport({ scale: 1 });
+  const vp = page.getViewport({ scale: Math.min(width / vp1.width, 4) });
+  const c = newCanvas(vp.width, vp.height), ctx = c.getContext('2d');
+  ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, c.width, c.height);
+  await page.render({ canvasContext: ctx, canvas: c, viewport: vp }).promise;
+  return c;
+}
+async function pdfThumbBlob(blob) {
+  const pdf = await openPdf(blob);
+  try { return await canvasBlob(scaledCopy(await renderPdfPage(pdf, 1, 480), 320), 0.7); } finally { closePdf(pdf); }
+}
+/* Digital invoices carry their text, so store, date and total can be read exactly. */
+async function pdfText(blob, maxPages) {
+  const pdf = await openPdf(blob);
+  try {
+    let out = '';
+    for (let i = 1; i <= Math.min(pdf.numPages, maxPages || 3); i++) {
+      const tc = await (await pdf.getPage(i)).getTextContent();
+      out += tc.items.map((it) => (it.str || '') + (it.hasEOL ? '\n' : ' ')).join('') + '\n';
+    }
+    return out;
+  } finally { closePdf(pdf); }
+}
+async function readPdf(blob) { const t = await pdfText(blob); return Object.assign({ text: t }, parseReceiptText(t)); }
+async function getFileBlob(f) {
+  const b = await idb.get('blobs', f.id);
+  if (b) return b;
+  if (!f.uploaded) throw new Error('this file is still on the other phone');
+  if (!DBX.connected() || !navigator.onLine) throw new Error('needs internet and Dropbox');
+  const r = await DBX.download(f.path);
+  if (!r) throw new Error('not found in Dropbox');
+  return r.blob;
+}
+
+/* ---------- viewer ---------- */
+let VIEW = null; // { f, blob, pdf, zoom, url }
+function closeViewer() {
+  const v = $('#viewer'); if (v) { v.hidden = true; v.innerHTML = ''; }
+  if (VIEW) { if (VIEW.pdf) closePdf(VIEW.pdf); if (VIEW.url) URL.revokeObjectURL(VIEW.url); }
+  VIEW = null;
+}
+async function openViewer(id) {
+  const f = D.files[id]; if (!f) return;
+  closeSheet();
+  const v = $('#viewer');
+  v.hidden = false;
+  v.innerHTML = '<div class="vbar"><button class="vbtn" data-act="vclose">Close</button><span class="vtitle">' + esc(f.kind || 'File') + '</span></div><div class="vbody"><p class="vmsg">Opening…</p></div>';
+  try {
+    const blob = await getFileBlob(f);
+    VIEW = { f, blob, zoom: 1 };
+    if (isPdfFile(f)) VIEW.pdf = await openPdf(blob);
+    else if (/^image\//.test(f.mime)) VIEW.url = URL.createObjectURL(blob);
+    else { closeViewer(); openFile(f); return; }
+    await drawViewer();
+  } catch (e) { closeViewer(); toast('Could not open: ' + e.message.slice(0, 100)); }
+}
+async function drawViewer() {
+  if (!VIEW) return;
+  const v = $('#viewer'), f = VIEW.f, pdf = VIEW.pdf;
+  const w = Math.round((Math.min(window.innerWidth, 640) - 16) * VIEW.zoom);
+  v.innerHTML = '<div class="vbar"><button class="vbtn" data-act="vclose">Close</button><span class="vtitle">' + esc(f.kind || 'File') + (pdf ? ' · ' + pdf.numPages + ' page' + (pdf.numPages > 1 ? 's' : '') : '') + '</span>' +
+    '<button class="vbtn" data-act="vzoom" data-v="-1" aria-label="Zoom out">−</button><button class="vbtn" data-act="vzoom" data-v="1" aria-label="Zoom in">+</button>' +
+    '<button class="vbtn" data-act="vext">Other app</button></div><div class="vbody" id="vbody"></div>';
+  const body = $('#vbody');
+  if (!pdf) { body.innerHTML = '<img src="' + VIEW.url + '" alt="' + esc(f.kind) + '" style="width:' + w + 'px;max-width:none;display:block;margin:0 auto">'; return; }
+  const n = Math.min(pdf.numPages, 30), dpr = Math.min(window.devicePixelRatio || 1, 2), mine = VIEW;
+  for (let i = 1; i <= n; i++) {
+    const c = await renderPdfPage(pdf, i, w * dpr);
+    if (VIEW !== mine) return;
+    c.style.width = w + 'px'; c.className = 'vpage';
+    body.appendChild(c);
+    const b = document.createElement('button');
+    b.className = 'vcrop'; b.dataset.act = 'vcrop'; b.dataset.v = String(i);
+    b.textContent = 'Crop a receipt from page ' + i;
+    body.appendChild(b);
+  }
+  if (pdf.numPages > n) body.insertAdjacentHTML('beforeend', '<p class="vmsg">Showing the first 30 pages. Use Other app for the rest.</p>');
+}
+async function cropFromPdfPage(n) {
+  const src = await renderPdfPage(VIEW.pdf, n, 1800);
+  const f = VIEW.f;
+  closeViewer();
+  if (!f.groupId) { f.groupId = uid(); touch(f); await saveData(); }
+  SNAP = { step: 'crop', file: { name: 'page-' + n + '.jpg', type: 'image/jpeg' }, isPdf: false, quarter: 0, deg: 0, docMode: false,
+    itemId: f.itemId || null, kind: 'Receipt', date: f.date || todayISO(), store: f.store || '', total: f.total === undefined ? '' : f.total,
+    src, fromFile: f.id, groupId: f.groupId };
+  rebuildWork();
+  SNAP_TARGET = f.itemId || null;
+  if (location.hash === '#/snap') render(); else location.hash = '#/snap';
+}
+/* ---------- v1.03: claims and fault log, service jobs, Send to Our Tax ---------- */
+const CLAIM_STATUS = ['Open', 'Waiting', 'Resolved', 'Rejected'];
+const LOG_KINDS = ['Fault', 'Phone call', 'Email', 'Visit', 'Repair', 'Replacement', 'Service', 'Note'];
+const OURTAX_URL = 'https://sskehan.github.io/ourtax/';
+function claimBadge(c) { return { kind: { Open: 'soon', Waiting: 'life', Resolved: 'ok', Rejected: 'gone' }[c.status] || 'none', label: c.status || 'Open' }; }
+function isOpenClaim(c) { return c.status === 'Open' || c.status === 'Waiting'; }
+function itemClaims(itemId) { return live('claims').filter((c) => c.itemId === itemId).sort((a, b) => (isOpenClaim(b) - isOpenClaim(a)) || (b.opened || '').localeCompare(a.opened || '')); }
+function sortLogs(a, b) { return (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0); }
+function claimLogs(claimId) { return live('logs').filter((l) => l.claimId === claimId).sort(sortLogs); }
+function itemLogs(itemId) { return live('logs').filter((l) => l.itemId === itemId).sort(sortLogs); }
+function liveItem(id) { const it = D.items[id]; return it && !it.deleted ? it : null; }
+function openClaims() { return live('claims').filter((c) => isOpenClaim(c) && liveItem(c.itemId)); }
+function itemServices(itemId) { return live('services').filter((s) => s.itemId === itemId); }
+function serviceStatus(s, now) {
+  const from = s.lastDone || s.startDate || todayISO(new Date(s.createdAt || Date.now()));
+  const next = addTerm(from, +s.everyMonths, 'months');
+  if (!next) return { kind: 'none', label: 'No date', next: null, days: null };
+  const d = daysUntil(next, now);
+  if (d < 0) return { kind: 'gone', label: 'Overdue', next, days: d };
+  if (d <= 30) return { kind: 'soon', label: d === 0 ? 'Due today' : 'Due in ' + d + ' day' + (d === 1 ? '' : 's'), next, days: d };
+  return { kind: 'ok', label: 'Next ' + fmtDate(next), next, days: d };
+}
+function servicesDue(now) {
+  return live('services').filter((s) => { const it = liveItem(s.itemId); return it && !it.archived; })
+    .map((s) => ({ s, st: serviceStatus(s, now), it: D.items[s.itemId] })).filter((x) => x.st.kind === 'gone' || x.st.kind === 'soon')
+    .sort((a, b) => a.st.days - b.st.days);
+}
+
+/* ---------- claims screens ---------- */
+function claimRow(c, showItem) {
+  const it = D.items[c.itemId], last = claimLogs(c.id)[0];
+  return '<a class="row" href="#/claim/' + c.id + '"><div class="grow"><div class="t">' + esc(c.title) + '</div><div class="s">' +
+    esc([showItem && it ? it.name : '', c.ticket ? 'Ticket ' + c.ticket : '', last ? 'Last entry ' + fmtDate(last.date) : 'Opened ' + fmtDate(c.opened)].filter(Boolean).join(' · ')) +
+    '</div></div>' + badge(claimBadge(c)) + '</a>';
+}
+function viewClaims() {
+  const all = live('claims').filter((c) => liveItem(c.itemId));
+  const open = all.filter(isOpenClaim).sort((a, b) => (b.opened || '').localeCompare(a.opened || ''));
+  const done = all.filter((c) => !isOpenClaim(c)).sort((a, b) => (b.closed || b.opened || '').localeCompare(a.closed || a.opened || ''));
+  let h = header('Claims', { sub: open.length + ' open' });
+  h += '<main>';
+  if (!all.length) h += '<div class="card empty">No claims yet. To start one, open an item, go to its Log tab and tap Log a fault.</div>';
+  if (open.length) h += '<section class="section"><h2>Open</h2><div class="card list">' + open.map((c) => claimRow(c, true)).join('') + '</div></section>';
+  if (done.length) h += '<section class="section"><h2>Finished</h2><div class="card list">' + done.map((c) => claimRow(c, true)).join('') + '</div></section>';
+  return h + '</main>' + nav('claims');
+}
+function entryHTML(l, showClaim) {
+  const c = l.claimId && D.claims[l.claimId];
+  const files = (l.fileIds || []).map((id) => D.files[id]).filter((f) => f && !f.deleted);
+  return '<button class="entry" data-act="logsheet" data-id="' + l.id + '"><div class="entry-head"><span class="t">' + esc(l.kind) + '</span><span class="muted">' + esc(fmtDate(l.date)) + '</span></div>' +
+    (showClaim && c && !c.deleted ? '<div class="muted">Claim: ' + esc(c.title) + '</div>' : '') +
+    (l.ticket || l.contact ? '<div class="muted">' + esc([l.ticket ? 'Ticket ' + l.ticket : '', l.contact].filter(Boolean).join(' · ')) + '</div>' : '') +
+    (l.text ? '<div style="white-space:pre-line">' + esc(l.text) + '</div>' : '') +
+    (files.length ? '<div class="entry-files">' + files.map((f) => '<img data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">').join('') + '</div>' : '') + '</button>';
+}
+function viewClaim(id) {
+  const c = D.claims[id];
+  if (!c || c.deleted || !liveItem(c.itemId)) return header('Not found', { back: '#/claims' }) + '<main><div class="card empty">This claim was deleted.</div></main>' + nav('claims');
+  const it = D.items[c.itemId], w = c.warrantyId && D.warranties[c.warrantyId] && !D.warranties[c.warrantyId].deleted ? D.warranties[c.warrantyId] : null;
+  const logs = claimLogs(id);
+  let h = header(c.title, { back: '#/item/' + it.id, sub: it.name });
+  h += '<main>';
+  h += '<div class="card pad form"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><label class="field" style="flex:1"><span>Status</span><select id="claimStatus" data-id="' + id + '">' +
+    CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label>' + badge(claimBadge(c)) + '</div>';
+  const kv = [['Opened', fmtDate(c.opened)], ['Ticket', c.ticket], ['Claim with', c.provider], ['Contact', c.contact],
+    ['Warranty', w ? (w.type || 'Warranty') + (w.covers ? ' (' + w.covers + ')' : '') + ' · ' + warrantyStatus(w, it).label : ''],
+    ['Closed', fmtDate(c.closed)], ['Outcome', c.resolution]].filter((r) => r[1]);
+  h += '<div class="kv" style="margin:0 -14px">' + kv.map((r) => '<div>' + esc(r[0]) + '</div><div style="white-space:pre-line">' + esc(r[1]) + '</div>').join('') + '</div>';
+  h += '<a class="btn quiet" href="#/claimform/' + it.id + '/' + id + '">Edit claim details</a></div>';
+  h += '<button class="btn primary big" data-act="packsheet" data-id="' + id + '">Make claim pack</button>';
+  h += '<div class="btns"><button class="btn" data-act="logsheet" data-id="" data-item="' + it.id + '" data-claim="' + id + '">Add entry</button>' +
+    '<button class="btn" data-act="claimphoto" data-id="' + id + '">Add photo</button></div>';
+  h += '<section class="section"><h2>Timeline</h2>' + (logs.length ? '<div class="timeline">' + logs.map((l) => entryHTML(l, false)).join('') + '</div>' : '<div class="card empty">No entries yet.</div>') + '</section>';
+  h += '<button class="btn danger" data-act="delclaim" data-id="' + id + '">Delete claim</button>';
+  return h + '</main>' + nav('claims');
+}
+function viewClaimForm(itemId, cid) {
+  const it = liveItem(itemId);
+  if (!it) return viewItems();
+  const isNew = !cid || cid === 'new';
+  const c = isNew ? { opened: todayISO(), status: 'Open', title: '' } : D.claims[cid];
+  if (!c) return viewItem(itemId);
+  const ws = itemWarranties(itemId);
+  const best = isNew ? (ws.map((w) => ({ w, s: warrantyStatus(w, it) })).filter((x) => ['ok', 'soon', 'life'].includes(x.s.kind))[0] || {}).w : null;
+  let h = header(isNew ? 'Log a fault' : 'Edit claim', { back: isNew ? '#/item/' + itemId : '#/claim/' + cid, sub: it.name });
+  h += '<main><form class="form" data-form="claim" data-item="' + itemId + '" data-id="' + esc(isNew ? '' : cid) + '">';
+  h += '<label class="field req"><span>What\'s wrong?</span><input name="title" required value="' + esc(c.title) + '" placeholder="Not cooling, error E5"></label>';
+  h += '<div class="grid2"><label class="field"><span>Date</span><input name="opened" type="date" value="' + esc(c.opened || '') + '"></label>' +
+    '<label class="field"><span>Status</span><select name="status">' + CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label></div>';
+  h += '<label class="field"><span>Warranty</span><select name="warrantyId">' + opt('', isNew ? (best ? best.id : '') : c.warrantyId, 'None or not sure') +
+    ws.map((w) => opt(w.id, isNew ? (best ? best.id : '') : c.warrantyId, (w.type || 'Warranty') + (w.covers ? ' (' + w.covers + ')' : '') + ' · ' + warrantyStatus(w, it).label)).join('') + '</select></label>';
+  h += '<div class="grid2"><label class="field"><span>Claim with</span><input name="provider" value="' + esc(c.provider || (best && best.provider) || it.store || '') + '" placeholder="Maker or store"></label>' +
+    '<label class="field"><span>Ticket or reference</span><input name="ticket" value="' + esc(c.ticket || '') + '"></label></div>';
+  h += '<label class="field"><span>Contact</span><input name="contact" value="' + esc(c.contact || (best && best.contact) || '') + '" placeholder="Name, phone or email"></label>';
+  if (isNew) h += '<label class="field"><span>What happened</span><textarea name="text" placeholder="When it started, what you tried, error codes"></textarea></label>';
+  else h += '<div class="grid2"><label class="field"><span>Closed</span><input name="closed" type="date" value="' + esc(c.closed || '') + '"></label><span></span></div>' +
+    '<label class="field"><span>Outcome</span><textarea name="resolution" placeholder="Repaired, replaced, refunded…">' + esc(c.resolution || '') + '</textarea></label>';
+  h += '<button class="btn primary big" type="submit">' + (isNew ? 'Start claim' : 'Save') + '</button></form></main>';
+  return h + nav('claims');
+}
+function logSheet(id, itemId, claimId) {
+  const l = id ? D.logs[id] : { date: todayISO(), kind: claimId ? 'Phone call' : 'Note', fileIds: [] };
+  if (!l) return;
+  const iid = id ? l.itemId : itemId;
+  const fs = itemFiles(iid).filter((f) => f.kind !== 'Claim pack');
+  let h = sheetHead(id ? 'Edit entry' : 'Add entry') + '<form class="form" data-form="log" data-id="' + esc(id || '') + '" data-item="' + esc(iid) + '" data-claim="' + esc(id ? (l.claimId || '') : (claimId || '')) + '">';
+  h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(l.date || '') + '"></label>' +
+    '<label class="field"><span>Type</span><select name="kind">' + LOG_KINDS.map((k) => opt(k, l.kind)).join('') + '</select></label></div>';
+  h += '<div class="grid2"><label class="field"><span>Ticket or reference</span><input name="ticket" value="' + esc(l.ticket || '') + '"></label>' +
+    '<label class="field"><span>Contact</span><input name="contact" value="' + esc(l.contact || '') + '"></label></div>';
+  h += '<label class="field"><span>What happened</span><textarea name="text">' + esc(l.text || '') + '</textarea></label>';
+  if (fs.length) h += '<div class="field"><span>Attach files from this item</span></div><div class="pickfiles">' + fs.map((f) =>
+    '<label><input type="checkbox" name="file" value="' + f.id + '"' + ((l.fileIds || []).includes(f.id) ? ' checked' : '') + '><img data-thumb="' + f.id + '" alt=""><span>' + esc(f.kind) + '</span></label>').join('') + '</div>';
+  h += '<button class="btn primary" type="submit">Save entry</button>';
+  if (id) h += '<button class="btn danger" type="button" data-act="dellog" data-id="' + id + '">Delete entry</button>';
+  openSheet(h + '</form>');
+}
+function itemLogTab(it) {
+  const cs = itemClaims(it.id), logs = itemLogs(it.id);
+  let h = '<section class="section"><div class="section-head"><h2>Claims</h2></div>' +
+    (cs.length ? '<div class="card list">' + cs.map((c) => claimRow(c, false)).join('') + '</div>' : '<div class="card empty">No claims for this item.</div>') + '</section>';
+  h += '<div class="btns"><a class="btn primary" href="#/claimform/' + it.id + '/new">Log a fault</a><button class="btn" data-act="logsheet" data-id="" data-item="' + it.id + '" data-claim="">Add note</button></div>';
+  h += '<section class="section"><h2>History</h2>' + (logs.length ? '<div class="timeline">' + logs.map((l) => entryHTML(l, true)).join('') + '</div>' : '<div class="card empty">Nothing logged yet.</div>') + '</section>';
+  return h;
+}
+
+/* ---------- service jobs ---------- */
+function servicesHTML(it) {
+  const ss = itemServices(it.id);
+  let h = '<section class="section"><div class="section-head"><h2>Service jobs</h2><button class="btn quiet" style="min-height:36px" data-act="svcsheet" data-id="" data-item="' + it.id + '">Add</button></div>';
+  if (!ss.length) return h + '<div class="muted">Nothing set up. Add repeating jobs like a filter clean or an annual service.</div></section>';
+  h += '<div class="card list">' + ss.map((s) => {
+    const st = serviceStatus(s);
+    return '<div class="row" style="cursor:default"><button class="grow" style="background:none;border:0;text-align:left;padding:0;cursor:pointer" data-act="svcsheet" data-id="' + s.id + '" data-item="' + it.id + '"><div class="t">' + esc(s.job) + '</div><div class="s">Every ' + esc(s.everyMonths) + ' month' + (+s.everyMonths === 1 ? '' : 's') +
+      (s.lastDone ? ' · last done ' + esc(fmtDate(s.lastDone)) : '') + '</div></button>' + badge(st) + '<button class="btn quiet" style="min-height:36px;padding:0 10px" data-act="svcdone" data-id="' + s.id + '">Done</button></div>';
+  }).join('') + '</div>';
+  return h + '</section>';
+}
+function svcSheet(id, itemId) {
+  const s = id ? D.services[id] : { everyMonths: 12 };
+  if (!s) return;
+  openSheet(sheetHead(id ? 'Edit service job' : 'Add service job') + '<form class="form" data-form="svc" data-id="' + esc(id || '') + '" data-item="' + esc(itemId) + '">' +
+    '<label class="field req"><span>Job</span><input name="job" required value="' + esc(s.job || '') + '" placeholder="Clean air con filters"></label>' +
+    '<div class="grid2"><label class="field req"><span>Every (months)</span><input name="everyMonths" type="number" inputmode="numeric" min="1" step="1" required value="' + esc(s.everyMonths || '') + '"></label>' +
+    '<label class="field"><span>Last done</span><input name="lastDone" type="date" value="' + esc(s.lastDone || '') + '"></label></div>' +
+    '<label class="field"><span>Notes</span><textarea name="notes" placeholder="Who does it, parts, cost">' + esc(s.notes || '') + '</textarea></label>' +
+    '<button class="btn primary" type="submit">Save</button>' + (id ? '<button class="btn danger" type="button" data-act="delsvc" data-id="' + id + '">Delete job</button>' : '') + '</form>');
+}
+
+/* ---------- Send to Our Tax ---------- */
+function ourTaxLink(it) {
+  const rec = itemFiles(it.id).find((f) => (f.kind === 'Receipt' || f.kind === 'Tax invoice') && f.path);
+  const q = new URLSearchParams({ from: 'ourgear', item: it.id, desc: [it.name, it.brand, it.model].filter(Boolean).join(' '),
+    amount: it.price === '' || it.price == null ? '' : String(it.price), date: it.purchaseDate || '', store: it.store || '', receipt: rec ? rec.path : '' });
+  return OURTAX_URL + '#/expense?' + q.toString();
+}
+function ourTaxText(it) {
+  return [it.name + (it.brand || it.model ? ' (' + [it.brand, it.model].filter(Boolean).join(' ') + ')' : ''), it.purchaseDate ? 'Bought ' + fmtDate(it.purchaseDate) : '',
+    it.store ? 'From ' + it.store : '', it.price !== '' && it.price != null ? 'Price ' + fmtMoney(it.price) : ''].filter(Boolean).join('\n');
+}
+function ourTaxHTML(it) {
+  if (!it.work) return '';
+  return '<div class="card pad form"><div class="t" style="font-weight:700">Work deduction</div>' +
+    (it.sentToTax ? '<div class="muted">Sent to Our Tax on ' + esc(fmtDate(it.sentToTax)) + '.</div>' : '<div class="muted">Not sent to Our Tax yet.</div>') +
+    '<button class="btn' + (it.sentToTax ? ' quiet' : ' primary') + '" data-act="sendtax" data-id="' + it.id + '">' + (it.sentToTax ? 'Send again' : 'Send to Our Tax') + '</button></div>';
+}
+/* ---------- v1.03: claim pack PDF, insurance inventory, CSV ---------- */
+async function getPdfLib() { if (typeof PDFLib === 'undefined') await loadScript('pdf-lib.min.js'); return PDFLib; }
+/* The built-in PDF fonts only know Western characters: swap or drop anything else. */
+function pdfSafe(s) {
+  return String(s == null ? '' : s).replace(/[‘’‚′]/g, "'").replace(/[“”„″]/g, '"')
+    .replace(/[–—−]/g, '-').replace(/…/g, '...').replace(/•/g, '-').replace(/ /g, ' ').replace(/\t/g, '  ')
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\x0A\x20-\x7E\xA0-\xFF]/g, '?');
+}
+class PdfWriter {
+  constructor(lib, doc, fonts, opts) {
+    this.lib = lib; this.doc = doc; this.f = fonts; this.o = Object.assign({ w: 595.28, h: 841.89, m: 46 }, opts || {});
+    this.newPage();
+  }
+  newPage() { this.page = this.doc.addPage([this.o.w, this.o.h]); this.y = this.o.h - this.o.m; return this.page; }
+  ensure(h) { if (this.y - h < this.o.m + 14) this.newPage(); }
+  wrap(text, size, font, width) {
+    const out = [];
+    pdfSafe(text).split('\n').forEach((para) => {
+      let line = '';
+      para.split(/(\s+)/).forEach((word) => {
+        const t = line + word;
+        if (font.widthOfTextAtSize(t.trimEnd(), size) <= width || !line.trim()) {
+          if (font.widthOfTextAtSize(t.trimEnd(), size) > width) { // a single long word: break it
+            let chunk = '';
+            for (const ch of t) { if (font.widthOfTextAtSize(chunk + ch, size) > width) { out.push(chunk); chunk = ch; } else chunk += ch; }
+            line = chunk;
+          } else line = t;
+        } else { out.push(line.trimEnd()); line = word.trimStart(); }
+      });
+      out.push(line.trimEnd());
+    });
+    return out;
+  }
+  text(str, o) {
+    const p = Object.assign({ size: 10, bold: false, x: this.o.m, width: this.o.w - 2 * this.o.m, color: [0.07, 0.09, 0.15], gap: 1.35 }, o || {});
+    const font = p.bold ? this.f.bold : this.f.reg;
+    this.wrap(str, p.size, font, p.width).forEach((ln) => {
+      this.ensure(p.size * p.gap);
+      this.page.drawText(ln, { x: p.x, y: this.y - p.size, size: p.size, font, color: this.lib.rgb(p.color[0], p.color[1], p.color[2]) });
+      this.y -= p.size * p.gap;
+    });
+  }
+  rule() { this.page.drawLine({ start: { x: this.o.m, y: this.y }, end: { x: this.o.w - this.o.m, y: this.y }, thickness: 0.6, color: this.lib.rgb(0.85, 0.86, 0.89) }); this.y -= 8; }
+  heading(str) { this.ensure(48); this.y -= 10; this.text(str, { size: 13, bold: true }); this.y -= 2; this.rule(); }
+  kv(rows) {
+    rows.filter((r) => r[1] !== '' && r[1] != null).forEach(([k, v]) => {
+      const lines = this.wrap(v, 10, this.f.reg, this.o.w - 2 * this.o.m - 150);
+      this.ensure(13.5 * Math.min(lines.length, 3));
+      const y0 = this.y;
+      this.page.drawText(pdfSafe(k), { x: this.o.m, y: this.y - 10, size: 9.5, font: this.f.reg, color: this.lib.rgb(0.42, 0.45, 0.5) });
+      this.text(v, { x: this.o.m + 150, width: this.o.w - 2 * this.o.m - 150 });
+      if (this.y === y0) this.y -= 13.5;
+      this.y -= 2;
+    });
+  }
+  footer(title) {
+    const pages = this.doc.getPages(), n = pages.length;
+    pages.forEach((pg, i) => {
+      const { width } = pg.getSize();
+      pg.drawText(pdfSafe(title + ' · page ' + (i + 1) + ' of ' + n), { x: 30, y: 16, size: 7.5, font: this.f.reg, color: this.lib.rgb(0.45, 0.47, 0.52) });
+      pg.drawText(pdfSafe('Made with Our Gear ' + fmtDate(todayISO())), { x: width - 30 - this.f.reg.widthOfTextAtSize('Made with Our Gear ' + fmtDate(todayISO()), 7.5), y: 16, size: 7.5, font: this.f.reg, color: this.lib.rgb(0.45, 0.47, 0.52) });
+    });
+  }
+}
+async function newPdf(opts) {
+  const lib = await getPdfLib();
+  const doc = await lib.PDFDocument.create();
+  const fonts = { reg: await doc.embedFont(lib.StandardFonts.Helvetica), bold: await doc.embedFont(lib.StandardFonts.HelveticaBold) };
+  return new PdfWriter(lib, doc, fonts, opts);
+}
+function fileCaption(f) { return [f.kind, fmtDate(f.date), f.store, f.total !== '' && f.total != null ? fmtMoney(f.total) : ''].filter(Boolean).join(' · '); }
+/* Add a document to the pack: photos get their own page, PDFs keep their original pages. */
+async function addDocument(W, f, n) {
+  const lib = W.lib, cap = 'Attachment ' + n + ': ' + fileCaption(f);
+  const blob = await getFileBlob(f);
+  if (isPdfFile(f)) {
+    try {
+      const src = await lib.PDFDocument.load(await blob.arrayBuffer(), { ignoreEncryption: true });
+      const pages = await W.doc.copyPages(src, src.getPageIndices());
+      pages.forEach((p, i) => {
+        W.doc.addPage(p);
+        const { width, height } = p.getSize();
+        const t = pdfSafe(cap + (pages.length > 1 ? ' (page ' + (i + 1) + ' of ' + pages.length + ')' : ''));
+        p.drawRectangle({ x: 0, y: height - 16, width, height: 16, color: lib.rgb(1, 1, 1), opacity: 0.85 });
+        p.drawText(t, { x: 8, y: height - 11, size: 7.5, font: W.f.reg, color: lib.rgb(0.3, 0.32, 0.38) });
+      });
+      return;
+    } catch (e) { /* protected or unusual PDF: fall back to pictures of its pages */ }
+    const pdf = await openPdf(blob);
+    try {
+      for (let i = 1; i <= Math.min(pdf.numPages, 15); i++) {
+        const jpg = await canvasBlob(await renderPdfPage(pdf, i, 1400), 0.82);
+        await addImagePage(W, jpg, cap + (pdf.numPages > 1 ? ' (page ' + i + ')' : ''));
+      }
+    } finally { closePdf(pdf); }
+    return;
+  }
+  if (/^image\//.test(f.mime)) { await addImagePage(W, blob, cap); return; }
+  throw new Error('can\'t add ' + (f.origName || 'this file type') + ' to a PDF');
+}
+async function addImagePage(W, blob, cap) {
+  let bytes = new Uint8Array(await blob.arrayBuffer());
+  if (blob.type !== 'image/jpeg') { const c = await loadSource(blob); bytes = new Uint8Array(await (await canvasBlob(c, 0.85)).arrayBuffer()); }
+  const img = await W.doc.embedJpg(bytes);
+  const pg = W.newPage();
+  W.text(cap, { size: 10, bold: true });
+  const maxW = W.o.w - 2 * W.o.m, maxH = W.y - W.o.m - 20;
+  const s = Math.min(maxW / img.width, maxH / img.height, 1.5);
+  pg.drawImage(img, { x: (W.o.w - img.width * s) / 2, y: W.y - 8 - img.height * s, width: img.width * s, height: img.height * s });
+  W.y = W.o.m; // page is full
+}
+
+/* ---------- claim pack ---------- */
+function packFiles(c) {
+  const fromLogs = new Set();
+  claimLogs(c.id).forEach((l) => (l.fileIds || []).forEach((id) => fromLogs.add(id)));
+  return itemFiles(c.itemId).filter((f) => f.kind !== 'Claim pack').map((f) => ({ f,
+    on: fromLogs.has(f.id) || f.claimId === c.id || ['Receipt', 'Tax invoice', 'Warranty card', 'Certificate'].includes(f.kind) }));
+}
+function packSheet(claimId) {
+  const c = D.claims[claimId], it = D.items[c.itemId], fs = packFiles(c);
+  let h = sheetHead('Claim pack') + '<div class="muted">One PDF with the item, its warranties, this claim\'s timeline, and the documents ticked below.</div>';
+  h += '<form class="form" data-form="pack" data-id="' + claimId + '">';
+  h += fs.length ? '<div class="pickfiles">' + fs.map(({ f, on }) => '<label><input type="checkbox" name="file" value="' + f.id + '"' + (on ? ' checked' : '') + '><img data-thumb="' + f.id + '" alt=""><span>' + esc(fileCaption(f)) + '</span></label>').join('') + '</div>'
+    : '<div class="warn">This item has no files. Add the receipt to ' + esc(it.name) + ' first if you can: a claim usually needs proof of purchase.</div>';
+  h += '<label class="check"><input type="checkbox" name="keep" checked> Save a copy to the item\'s files</label>';
+  h += '<button class="btn primary big" type="submit">Make claim pack</button><div class="muted" id="packmsg"></div></form>';
+  openSheet(h);
+}
+async function buildClaimPack(c, fileIds) {
+  const it = D.items[c.itemId], p = propById(it.propertyId);
+  const W = await newPdf();
+  W.text('Warranty claim', { size: 20, bold: true, color: [0.31, 0.27, 0.9] });
+  W.text(it.name, { size: 15, bold: true });
+  W.text(c.title, { size: 11, color: [0.42, 0.45, 0.5] });
+  W.y -= 6;
+  W.heading('Item');
+  W.kv([['Item', it.name], ['Brand', it.brand], ['Model', it.model], ['Serial number', it.serial], ['Category', it.category],
+    ['Location', [p ? p.name + (p.address ? ', ' + p.address : '') : '', it.location, it.spot].filter(Boolean).join(' · ')],
+    ['Bought from', it.store], ['Purchase date', fmtDate(it.purchaseDate)], ['Install date', fmtDate(it.installDate)], ['Price paid', fmtMoney(it.price)]]);
+  const ws = itemWarranties(it.id);
+  if (ws.length) {
+    W.heading('Warranties');
+    ws.forEach((w) => {
+      const s = warrantyStatus(w, it);
+      W.kv([[w.type + ' warranty' + (w.covers ? ' (' + w.covers + ')' : ''), w.termUnit === 'lifetime' ? 'Lifetime' : (w.termValue ? w.termValue + ' ' + w.termUnit : '') + (s.expiry ? ', ends ' + fmtDate(s.expiry) : '') + ' · ' + s.label],
+        ['Provider', [w.provider, w.contact].filter(Boolean).join(' · ')], ['Conditions', w.conditions]]);
+      W.y -= 4;
+    });
+  }
+  W.heading('Claim');
+  W.kv([['Fault', c.title], ['Status', c.status], ['Opened', fmtDate(c.opened)], ['Ticket or reference', c.ticket], ['Claim with', c.provider], ['Contact', c.contact],
+    ['Closed', fmtDate(c.closed)], ['Outcome', c.resolution]]);
+  const logs = claimLogs(c.id).slice().reverse();
+  if (logs.length) {
+    W.heading('Timeline');
+    logs.forEach((l) => {
+      W.ensure(40);
+      W.text(fmtDate(l.date) + ' · ' + l.kind + (l.ticket ? ' · Ticket ' + l.ticket : '') + (l.contact ? ' · ' + l.contact : ''), { bold: true });
+      if (l.text) W.text(l.text, { x: W.o.m + 10, width: W.o.w - 2 * W.o.m - 10 });
+      W.y -= 6;
+    });
+  }
+  const files = fileIds.map((id) => D.files[id]).filter(Boolean);
+  if (files.length) {
+    W.heading('Attached documents');
+    files.forEach((f, i) => W.text((i + 1) + '. ' + fileCaption(f)));
+  }
+  const missed = [];
+  for (let i = 0; i < files.length; i++) {
+    const msg = $('#packmsg'); if (msg) msg.textContent = 'Adding document ' + (i + 1) + ' of ' + files.length + '…';
+    try { await addDocument(W, files[i], i + 1); } catch (e) { missed.push(fileCaption(files[i]) + ' (' + e.message + ')'); }
+  }
+  if (missed.length) { W.newPage(); W.heading('Not included'); missed.forEach((m) => W.text(m)); }
+  W.footer('Claim pack: ' + it.name);
+  return { bytes: await W.doc.save(), missed };
+}
+
+/* ---------- insurance inventory ---------- */
+let REP = { prop: 'all', arch: false };
+function inventoryRows() {
+  return live('items').filter((i) => (REP.arch || !i.archived) && (REP.prop === 'all' || i.propertyId === REP.prop) && (i.status || 'Active') === 'Active')
+    .sort((a, b) => propName(a.propertyId).localeCompare(propName(b.propertyId)) || (a.location || '~').localeCompare(b.location || '~') || a.name.localeCompare(b.name));
+}
+function num(v) { return v === '' || v == null || isNaN(+v) ? 0 : +v; }
+function viewReports() {
+  const rows = inventoryRows(), props = D.lists.properties;
+  const by = groupBy(rows, 'propertyId');
+  let h = header('Insurance inventory', { back: '#/settings', sub: rows.length + ' items' });
+  h += '<main><div class="card pad form"><label class="field"><span>Property</span><select id="repProp">' + opt('all', REP.prop, 'All properties') +
+    props.map((p) => opt(p.id, REP.prop, p.name)).join('') + '</select></label>' +
+    '<label class="check"><input type="checkbox" id="repArch"' + (REP.arch ? ' checked' : '') + '> Include archived items</label>' +
+    '<div class="muted">Sold, disposed and replaced items are left out.</div></div>';
+  h += '<div class="card list">' + Object.keys(by).map((pid) => {
+    const r = by[pid], noVal = r.filter((i) => !num(i.replacementValue) && !num(i.price)).length;
+    return '<div class="row" style="cursor:default"><div class="grow"><div class="t">' + esc(propName(pid)) + '</div><div class="s">' + r.length + ' items' +
+      (noVal ? ' · ' + noVal + ' with no value' : '') + '</div></div><div style="text-align:right"><div class="t">' + esc(fmtMoney(r.reduce((s, i) => s + (num(i.replacementValue) || num(i.price)), 0))) + '</div><div class="s">replacement</div></div></div>';
+  }).join('') + (rows.length ? '' : '<div class="empty">No items to list.</div>') + '</div>';
+  h += '<div class="muted">Totals use the replacement value, or the price paid where no replacement value is set.</div>';
+  h += '<div class="btns"><button class="btn primary" data-act="invpdf"' + (rows.length ? '' : ' disabled') + '>Make PDF</button><button class="btn" data-act="invcsv"' + (rows.length ? '' : ' disabled') + '>Make spreadsheet (CSV)</button></div>';
+  h += '<button class="btn quiet" data-act="allcsv">All items and warranties (CSV)</button>';
+  return h + '</main>' + nav('settings');
+}
+async function buildInventoryPdf() {
+  const rows = inventoryRows(), by = groupBy(rows, 'propertyId');
+  const W = await newPdf({ w: 841.89, h: 595.28, m: 34 });
+  const lib = W.lib, cols = [{ k: 'Item', w: 230 }, { k: 'Location', w: 120 }, { k: 'Serial', w: 120 }, { k: 'Purchased', w: 80 }, { k: 'Price paid', w: 80, r: 1 }, { k: 'Replacement', w: 90, r: 1 }];
+  const tableW = cols.reduce((s, c) => s + c.w, 0);
+  W.text('Contents inventory', { size: 20, bold: true, color: [0.31, 0.27, 0.9] });
+  W.text('As at ' + fmtDate(todayISO()) + ' · ' + rows.length + ' items' + (REP.prop === 'all' ? '' : ' · ' + propName(REP.prop)), { size: 10, color: [0.42, 0.45, 0.5] });
+  let grand = 0;
+  const head = () => {
+    W.ensure(30);
+    let x = W.o.m;
+    W.page.drawRectangle({ x: W.o.m, y: W.y - 16, width: tableW, height: 16, color: lib.rgb(0.95, 0.96, 0.97) });
+    cols.forEach((c) => { const t = c.k; W.page.drawText(t, { x: c.r ? x + c.w - 6 - W.f.bold.widthOfTextAtSize(t, 8.5) : x + 4, y: W.y - 11.5, size: 8.5, font: W.f.bold, color: lib.rgb(0.25, 0.27, 0.32) }); x += c.w; });
+    W.y -= 20;
+  };
+  Object.keys(by).forEach((pid) => {
+    const p = propById(pid), r = by[pid];
+    W.ensure(70); W.y -= 8;
+    W.text((p ? p.name : 'No property') + (p ? ' (' + p.type + ')' : '') + (p && p.address ? ' · ' + p.address : ''), { size: 12.5, bold: true });
+    W.y -= 2; head();
+    let sub = 0;
+    r.forEach((i) => {
+      const nameLines = W.wrap(i.name, 9.5, W.f.bold, cols[0].w - 8).concat(i.brand || i.model ? W.wrap([i.brand, i.model].filter(Boolean).join(' '), 8.5, W.f.reg, cols[0].w - 8) : []);
+      const locLines = W.wrap([i.location, i.spot].filter(Boolean).join(', '), 8.5, W.f.reg, cols[1].w - 8);
+      const serLines = W.wrap(i.serial || '', 8.5, W.f.reg, cols[2].w - 8);
+      const hgt = Math.max(nameLines.length, locLines.length, serLines.length, 1) * 11 + 6;
+      if (W.y - hgt < W.o.m + 14) { W.newPage(); head(); }
+      const top = W.y; let x = W.o.m;
+      const cell = (lines, col, size, font) => { lines.forEach((ln, n) => W.page.drawText(ln, { x: x + 4, y: top - 10 - n * 11, size, font, color: lib.rgb(0.07, 0.09, 0.15) })); };
+      nameLines.forEach((ln, n) => W.page.drawText(ln, { x: x + 4, y: top - 10 - n * 11, size: n === 0 ? 9.5 : 8.5, font: n === 0 ? W.f.bold : W.f.reg, color: lib.rgb(0.07, 0.09, 0.15) }));
+      x += cols[0].w; cell(locLines, 1, 8.5, W.f.reg); x += cols[1].w; cell(serLines, 2, 8.5, W.f.reg); x += cols[2].w;
+      cell([pdfSafe(fmtDate(i.purchaseDate))], 3, 8.5, W.f.reg); x += cols[3].w;
+      [[i.price, cols[4]], [i.replacementValue, cols[5]]].forEach(([v, c]) => {
+        const t = num(v) ? pdfSafe(fmtMoney(v)) : '';
+        if (t) W.page.drawText(t, { x: x + c.w - 6 - W.f.reg.widthOfTextAtSize(t, 8.5), y: top - 10, size: 8.5, font: W.f.reg, color: lib.rgb(0.07, 0.09, 0.15) });
+        x += c.w;
+      });
+      W.y -= hgt;
+      W.page.drawLine({ start: { x: W.o.m, y: W.y + 2 }, end: { x: W.o.m + tableW, y: W.y + 2 }, thickness: 0.4, color: lib.rgb(0.88, 0.89, 0.91) });
+      sub += num(i.replacementValue) || num(i.price);
+    });
+    grand += sub;
+    W.ensure(20);
+    const t = 'Subtotal ' + pdfSafe(fmtMoney(sub));
+    W.page.drawText(t, { x: W.o.m + tableW - 6 - W.f.bold.widthOfTextAtSize(t, 9.5), y: W.y - 12, size: 9.5, font: W.f.bold, color: lib.rgb(0.07, 0.09, 0.15) });
+    W.y -= 22;
+  });
+  W.ensure(30);
+  const g = 'Total replacement value ' + pdfSafe(fmtMoney(grand));
+  W.page.drawText(g, { x: W.o.m + tableW - 6 - W.f.bold.widthOfTextAtSize(g, 11.5), y: W.y - 14, size: 11.5, font: W.f.bold, color: lib.rgb(0.07, 0.09, 0.15) });
+  W.y -= 24;
+  W.text('Replacement value is used where set; otherwise the price paid. Receipts and photos for each item are kept in Our Gear and Dropbox.', { size: 8.5, color: [0.42, 0.45, 0.5] });
+  W.footer('Contents inventory');
+  return W.doc.save();
+}
+function csvCell(v) { const s = String(v == null ? '' : v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function toCsv(rows) { return '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n'); }
+function inventoryCsv() {
+  return toCsv([['Property', 'Property type', 'Address', 'Location', 'Exact spot', 'Item', 'Category', 'Brand', 'Model', 'Serial', 'Store', 'Purchase date', 'Price paid', 'Replacement value']]
+    .concat(inventoryRows().map((i) => { const p = propById(i.propertyId) || {}; return [p.name, p.type, p.address, i.location, i.spot, i.name, i.category, i.brand, i.model, i.serial, i.store, i.purchaseDate, i.price, i.replacementValue]; })));
+}
+function allCsv() {
+  const head = ['Item', 'Status', 'Archived', 'Property', 'Location', 'Category', 'Brand', 'Model', 'Serial', 'Store', 'Purchase date', 'Install date', 'Price paid', 'Replacement value', 'Work deduction', 'Warranty type', 'Covers', 'Term', 'Expiry', 'Warranty status', 'Provider'];
+  const out = [head];
+  live('items').sort((a, b) => a.name.localeCompare(b.name)).forEach((i) => {
+    const base = [i.name, i.status || 'Active', i.archived ? 'Yes' : '', propName(i.propertyId), i.location, i.category, i.brand, i.model, i.serial, i.store, i.purchaseDate, i.installDate, i.price, i.replacementValue, i.work ? 'Yes' : ''];
+    const ws = itemWarranties(i.id);
+    if (!ws.length) out.push(base.concat(['', '', '', '', '', '']));
+    ws.forEach((w) => { const s = warrantyStatus(w, i); out.push(base.concat([w.type, w.covers, w.termUnit === 'lifetime' ? 'Lifetime' : (w.termValue ? w.termValue + ' ' + w.termUnit : ''), s.expiry || '', s.label, w.provider])); });
+  });
+  return toCsv(out);
+}
+/* Sharing needs a fresh tap, so finished files are offered on a sheet. */
+let READY = null;
+function readySheet(blob, name, title, note) {
+  READY = { blob, name, title };
+  openSheet(sheetHead(title) + (note ? '<div class="muted">' + esc(note) + '</div>' : '') +
+    '<div class="btns"><button class="btn primary" data-act="readyshare">Share or email</button><button class="btn" data-act="readysave">Save to phone</button></div>' +
+    '<button class="btn quiet" data-act="readyview">Open</button>');
+}
+async function shareReady() {
+  const file = new File([READY.blob], READY.name, { type: READY.blob.type });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: READY.title }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  saveReady();
+}
+function saveReady() {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(READY.blob); a.download = READY.name;
+  document.body.appendChild(a); a.click(); a.remove(); toast('Saved to Downloads');
 }
 /* ---------- routing ---------- */
 function render() {
@@ -1277,24 +1902,31 @@ function render() {
     case 'settings': html = viewSettings(); break;
     case 'suggest': html = viewSuggest(); break;
     case 'import': html = viewImport(); break;
+    case 'claims': html = viewClaims(); break;
+    case 'claim': html = viewClaim(parts[1]); break;
+    case 'claimform': html = viewClaimForm(parts[1], parts[2]); break;
+    case 'reports': html = viewReports(); break;
     default: html = viewHome();
   }
   app.innerHTML = html;
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'crop') { drawCropView(); bindCropDrag(); }
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'details' && SNAP.result) { const im = $('#snapprev'); if (im) im.src = URL.createObjectURL(SNAP.result.full); }
+  if (parts[0] === 'snap' && SNAP && SNAP.step === 'details' && SNAP.isPdf) snapPdfDetails();
+  if (parts[0] === 'items') { const l = $('#itemlist'); if (l) l.innerHTML = itemsListHTML(); }
   if (parts[0] === 'warranty') warrantyPreview();
   if (parts[0] === 'settings') storageInfo();
   hydrateThumbs();
 }
 let lastRoute = '';
+let CLAIM_TARGET = null;
 window.addEventListener('hashchange', () => {
   const r = location.hash.split('/')[1] || '';
-  if (r !== 'item' && r !== 'warranty') ITEM_TAB = 'details';
+  if (r !== 'item' && r !== 'warranty' && r !== 'claim' && r !== 'claimform') ITEM_TAB = 'details';
   if (r !== 'snap') { SNAP = null; }
-  if (r !== 'snap' && r !== 'item') SNAP_TARGET = null;
+  if (r !== 'snap') { SNAP_TARGET = null; CLAIM_TARGET = null; }
   if (r !== 'new') { /* keep prefill only for the new-item screen */ if (lastRoute === 'new') NEW_ITEM_PREFILL = null; }
   lastRoute = r;
-  closeSheet(); render(); window.scrollTo(0, 0);
+  closeSheet(); closeViewer(); render(); window.scrollTo(0, 0);
 });
 
 /* ---------- actions ---------- */
@@ -1306,7 +1938,7 @@ const ACT = {
   async archive(el) {
     const it = D.items[el.dataset.id];
     it.archived = true; it.archivedAt = Date.now(); touch(it);
-    for (const f of itemFiles(it.id)) await dropThumb(f.id);
+    for (const f of itemFiles(it.id)) if (f.uploaded) await dropThumb(f.id);
     await saveData(); toast('Archived. Restore it any time.'); render();
   },
   async restore(el) {
@@ -1317,7 +1949,7 @@ const ACT = {
   async archiveall() {
     const byItem = groupBy(live('warranties'), 'itemId');
     const items = live('items').filter((i) => suggestArchive(i, byItem[i.id] || []));
-    for (const it of items) { it.archived = true; it.archivedAt = Date.now(); touch(it); for (const f of itemFiles(it.id)) await dropThumb(f.id); }
+    for (const it of items) { it.archived = true; it.archivedAt = Date.now(); touch(it); for (const f of itemFiles(it.id)) if (f.uploaded) await dropThumb(f.id); }
     await saveData(); toast(items.length + ' archived'); go('#/home');
   },
   async delitem(el) {
@@ -1327,6 +1959,7 @@ const ACT = {
     it.deleted = true; touch(it);
     itemWarranties(it.id).forEach((w) => { w.deleted = true; touch(w); });
     for (const f of itemFiles(it.id)) { f.deleted = true; touch(f); await dropThumb(f.id); }
+    ['claims', 'logs', 'services'].forEach((c) => live(c).filter((r) => r.itemId === it.id).forEach((r) => { r.deleted = true; touch(r); }));
     await saveData(); toast('Deleted'); go('#/items');
   },
   async delwarranty(el) {
@@ -1358,7 +1991,7 @@ const ACT = {
     const f = D.files[el.dataset.id]; f.deleted = true; touch(f); await dropThumb(f.id);
     await saveData(); closeSheet(); render(); toast('File deleted');
   },
-  snapcancel() { SNAP = null; go(SNAP_TARGET ? '#/item/' + SNAP_TARGET : '#/home'); },
+  snapcancel() { const t = SNAP_TARGET; SNAP = null; SNAP_TARGET = null; go(t ? '#/item/' + t : '#/home'); },
   rot() { SNAP.quarter = (SNAP.quarter + 1) % 4; rebuildWork(); drawCropView(); },
   cropall() { SNAP.crop = { x: 0, y: 0, w: SNAP.work.width, h: SNAP.work.height }; placeCropRect(); },
   docmode(el) { SNAP.docMode = !SNAP.docMode; el.setAttribute('aria-pressed', SNAP.docMode); },
@@ -1383,7 +2016,7 @@ const ACT = {
       let blob = await idb.get('blobs', f.id);
       if (!blob && f.uploaded) { const r = await DBX.download(f.path); blob = r && r.blob; }
       if (!blob) throw new Error('file not available offline');
-      const r = await readReceipt(blob);
+      const r = isPdfFile(f) ? await readPdf(blob) : await readReceipt(blob);
       const n = fillEmpty(document.querySelector('form[data-form="file"]'), r);
       toast(n ? 'Filled ' + n + ' detail' + (n > 1 ? 's' : '') + '. Check, then Save changes.' : 'Couldn\'t read the details');
     } catch (e) { toast('Could not read: ' + e.message.slice(0, 80)); }
@@ -1392,7 +2025,7 @@ const ACT = {
   autoread(el) { S.autoRead = el.checked; saveSettings(); },
   imppile(el) { IMP_PILE = el.dataset.v; render(); },
   async impocr(el) {
-    const d = IMP.drafts[el.dataset.id], img = d.files.find((x) => /^image\//.test(x.mime));
+    const d = IMP.drafts[el.dataset.id], img = d.files.find((x) => x.thumb);
     el.disabled = true; el.textContent = 'Reading…';
     try {
       const r = await readReceipt(await idb.get('blobs', img.id));
@@ -1420,6 +2053,47 @@ const ACT = {
     if (!confirm('Cancel the import? Notes not yet accepted are dropped. Items already added stay.')) return;
     await clearImport(); render();
   },
+  viewfile(el) { openViewer(el.dataset.id); },
+  vclose() { closeViewer(); },
+  vext() { const f = VIEW && VIEW.f; closeViewer(); if (f) openFile(f); },
+  vzoom(el) { if (!VIEW) return; VIEW.zoom = Math.min(3, Math.max(1, VIEW.zoom + (+el.dataset.v) * 0.5)); drawViewer(); },
+  async vcrop(el) { el.disabled = true; el.textContent = 'Preparing page…'; try { await cropFromPdfPage(+el.dataset.v); } catch (e) { toast('Could not open that page: ' + e.message.slice(0, 80)); el.disabled = false; } },
+  logsheet(el) { logSheet(el.dataset.id, el.dataset.item, el.dataset.claim); },
+  async dellog(el) { if (!confirm('Delete this entry?')) return; const l = D.logs[el.dataset.id]; l.deleted = true; touch(l); await saveData(); closeSheet(); render(); },
+  async delclaim(el) {
+    if (!confirm('Delete this claim and its timeline? Files stay with the item.')) return;
+    const c = D.claims[el.dataset.id]; c.deleted = true; touch(c);
+    claimLogs(c.id).forEach((l) => { l.deleted = true; touch(l); });
+    await saveData(); ITEM_TAB = 'log'; go('#/item/' + c.itemId);
+  },
+  claimphoto(el) { const c = D.claims[el.dataset.id]; CLAIM_TARGET = c.id; SNAP_TARGET = c.itemId; go('#/snap'); },
+  packsheet(el) { packSheet(el.dataset.id); },
+  svcsheet(el) { svcSheet(el.dataset.id, el.dataset.item); },
+  async svcdone(el) {
+    const s = D.services[el.dataset.id]; s.lastDone = todayISO(); touch(s);
+    const l = touch({ id: uid(), itemId: s.itemId, claimId: null, date: todayISO(), kind: 'Service', ticket: '', contact: '', text: s.job + ' done', fileIds: [], createdAt: Date.now() });
+    D.logs[l.id] = l;
+    await saveData(); toast('Marked done. Next due ' + fmtDate(serviceStatus(s).next)); render();
+  },
+  async delsvc(el) { if (!confirm('Delete this service job?')) return; const s = D.services[el.dataset.id]; s.deleted = true; touch(s); await saveData(); closeSheet(); render(); },
+  async sendtax(el) {
+    const it = D.items[el.dataset.id];
+    try { await navigator.clipboard.writeText(ourTaxText(it)); } catch (e) { /* clipboard not allowed */ }
+    window.open(ourTaxLink(it), '_blank');
+    it.sentToTax = todayISO(); touch(it); await saveData(); render();
+    toast('Sent to Our Tax. The details are also copied, ready to paste.');
+  },
+  async invpdf(el) {
+    el.disabled = true; el.textContent = 'Making PDF…';
+    try { const bytes = await buildInventoryPdf(); readySheet(new Blob([bytes], { type: 'application/pdf' }), 'Contents-inventory-' + todayISO() + '.pdf', 'Inventory ready', inventoryRows().length + ' items'); }
+    catch (e) { toast('Could not make the PDF: ' + e.message.slice(0, 80)); }
+    el.disabled = false; el.textContent = 'Make PDF';
+  },
+  invcsv() { readySheet(new Blob([inventoryCsv()], { type: 'text/csv' }), 'Contents-inventory-' + todayISO() + '.csv', 'Spreadsheet ready', 'Opens in Excel or Google Sheets'); },
+  allcsv() { readySheet(new Blob([allCsv()], { type: 'text/csv' }), 'Our-Gear-items-' + todayISO() + '.csv', 'Spreadsheet ready', 'Every item with its warranties'); },
+  readyshare() { shareReady(); },
+  readysave() { saveReady(); },
+  readyview() { window.open(URL.createObjectURL(READY.blob), '_blank'); },
   dbxon() { DBX.connect(); },
   dbxoff() { if (confirm('Disconnect Dropbox on this phone? Your records stay on the phone and in Dropbox.')) { DBX.disconnect(); render(); } },
   wifionly(el) { S.wifiOnly = el.checked; saveSettings(); },
@@ -1461,8 +2135,16 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.dataset && t.dataset.act === 'wifionly') { ACT.wifionly(t); return; }
-  if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) startSnap(f, SNAP_TARGET); return; }
+  if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) { const cl = CLAIM_TARGET; await startSnap(f, SNAP_TARGET); if (SNAP) { SNAP.claimId = cl; if (cl) SNAP.kind = 'Photo'; } } return; }
   if (t.id === 'fcat') { ITEMS_F.cat = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
+  if (t.id === 'claimStatus') {
+    const c = D.claims[t.dataset.id]; c.status = t.value;
+    if (!isOpenClaim(c) && !c.closed) c.closed = todayISO();
+    if (isOpenClaim(c)) c.closed = '';
+    touch(c); await saveData(); render(); toast('Status: ' + c.status); return;
+  }
+  if (t.id === 'repProp') { REP.prop = t.value; render(); return; }
+  if (t.id === 'repArch') { REP.arch = t.checked; render(); return; }
   if (t.id === 'ownerSel') { S.owner = t.value; saveSettings(); toast('Saved'); return; }
   if (t.id === 'deg') { SNAP.deg = +t.value; rebuildWork(); drawCropView(); return; }
   if (t.id === 'restoreIn') { restoreBackup(t.files && t.files[0]); return; }
@@ -1519,14 +2201,20 @@ document.addEventListener('submit', async (e) => {
     const btns = form.querySelectorAll('button'); btns.forEach((b) => { b.disabled = true; });
     const full = SNAP.isPdf ? SNAP.file : SNAP.result.full, thumb = SNAP.isPdf ? null : SNAP.result.thumb;
     const f = touch({ id: uid(), itemId: SNAP.itemId || null, kind: SNAP.kind, date: SNAP.date, store: SNAP.store, total: SNAP.total === '' ? '' : +SNAP.total,
-      mime: SNAP.isPdf ? 'application/pdf' : 'image/jpeg', origName: SNAP.file.name || '', size: full.size, uploaded: false, path: null, createdAt: Date.now() });
+      mime: SNAP.isPdf ? 'application/pdf' : 'image/jpeg', origName: SNAP.file.name || '', size: full.size, uploaded: false, path: null, createdAt: Date.now(),
+      groupId: SNAP.groupId || null, derivedFrom: SNAP.fromFile || null, claimId: SNAP.claimId || null });
     await idb.put('blobs', f.id, full);
     if (thumb) await idb.put('thumbs', f.id, thumb);
+    else if (SNAP.isPdf) { try { await idb.put('thumbs', f.id, await pdfThumbBlob(full)); } catch (err) { /* unreadable PDF */ } }
     D.files[f.id] = f;
     await saveData();
     const target = f.itemId;
     SNAP = null; SNAP_TARGET = null;
-    if (target) { ITEM_TAB = 'files'; go('#/item/' + target); toast('Saved'); }
+    if (f.claimId && D.claims[f.claimId]) {
+      const l = touch({ id: uid(), itemId: f.itemId, claimId: f.claimId, date: f.date || todayISO(), kind: 'Note', ticket: '', contact: '', text: f.kind + ' added', fileIds: [f.id], createdAt: Date.now() });
+      D.logs[l.id] = l; await saveData(); go('#/claim/' + f.claimId); toast('Photo added to the claim');
+    } else if (dest === 'crop') { go(target ? '#/item/' + target : '#/inbox'); setTimeout(() => openViewer(f.id), 60); }
+    else if (target) { ITEM_TAB = 'files'; go('#/item/' + target); toast('Saved'); }
     else if (dest === 'file') { go('#/inbox'); setTimeout(() => openPicker(f.id), 50); }
     else { go('#/inbox'); toast('Saved to inbox'); }
   } else if (kind === 'file') {
@@ -1548,6 +2236,54 @@ document.addEventListener('submit', async (e) => {
     if (!vals.name) { toast('Give the item a name'); return; }
     acceptDraft(d, vals, false);
     await saveImport(); await saveData(); toast('Added'); render();
+  } else if (kind === 'claim') {
+    const id = form.dataset.id, itemId = form.dataset.item;
+    if (!v('title')) { toast('Say what\'s wrong'); return; }
+    const c = id ? D.claims[id] : { id: uid(), itemId, createdAt: Date.now() };
+    ['title', 'opened', 'status', 'warrantyId', 'provider', 'ticket', 'contact'].forEach((k) => { c[k] = v(k); });
+    if (id) { c.closed = v('closed'); c.resolution = v('resolution'); }
+    if (!isOpenClaim(c) && !c.closed) c.closed = todayISO();
+    D.claims[c.id] = touch(c);
+    if (!id) {
+      const l = touch({ id: uid(), itemId, claimId: c.id, date: c.opened || todayISO(), kind: 'Fault', ticket: c.ticket, contact: c.contact, text: v('text'), fileIds: [], createdAt: Date.now() });
+      D.logs[l.id] = l;
+    }
+    await saveData(); toast(id ? 'Saved' : 'Claim started'); go('#/claim/' + c.id);
+  } else if (kind === 'log') {
+    const id = form.dataset.id;
+    const l = id ? D.logs[id] : { id: uid(), itemId: form.dataset.item, claimId: form.dataset.claim || null, createdAt: Date.now() };
+    ['date', 'kind', 'ticket', 'contact', 'text'].forEach((k) => { l[k] = v(k); });
+    l.fileIds = fd.getAll('file').map(String);
+    if (!l.text && !l.fileIds.length && !l.ticket) { toast('Add some details first'); return; }
+    D.logs[l.id] = touch(l);
+    if (l.claimId && l.ticket && D.claims[l.claimId] && !D.claims[l.claimId].ticket) { D.claims[l.claimId].ticket = l.ticket; touch(D.claims[l.claimId]); }
+    await saveData(); closeSheet(); render(); toast('Entry saved');
+  } else if (kind === 'svc') {
+    const id = form.dataset.id;
+    if (!v('job') || !(+v('everyMonths') > 0)) { toast('Enter the job and how often'); return; }
+    const s = id ? D.services[id] : { id: uid(), itemId: form.dataset.item, createdAt: Date.now() };
+    s.job = v('job'); s.everyMonths = String(Math.round(+v('everyMonths'))); s.lastDone = v('lastDone'); s.notes = v('notes');
+    D.services[s.id] = touch(s);
+    await saveData(); closeSheet(); render(); toast('Service job saved');
+  } else if (kind === 'pack') {
+    const c = D.claims[form.dataset.id], ids = fd.getAll('file').map(String), keep = fd.get('keep') === 'on';
+    const btn = form.querySelector('button[type="submit"]'); btn.disabled = true; btn.textContent = 'Making claim pack…';
+    try {
+      const r = await buildClaimPack(c, ids);
+      const blob = new Blob([r.bytes], { type: 'application/pdf' });
+      const it = D.items[c.itemId], name = 'Claim-pack-' + safeName(it.name, 30) + '-' + todayISO() + '.pdf';
+      if (keep) {
+        const f = touch({ id: uid(), itemId: it.id, kind: 'Claim pack', date: todayISO(), store: '', total: '', mime: 'application/pdf', origName: name,
+          size: blob.size, uploaded: false, path: null, createdAt: Date.now(), claimId: c.id });
+        await idb.put('blobs', f.id, blob);
+        try { await idb.put('thumbs', f.id, await pdfThumbBlob(blob)); } catch (e) { /* no preview */ }
+        D.files[f.id] = f;
+        const l = touch({ id: uid(), itemId: it.id, claimId: c.id, date: todayISO(), kind: 'Note', ticket: '', contact: '', text: 'Claim pack made (' + ids.length + ' document' + (ids.length === 1 ? '' : 's') + ')', fileIds: [f.id], createdAt: Date.now() });
+        D.logs[l.id] = l;
+        await saveData(); render();
+      }
+      readySheet(blob, name, 'Claim pack ready', r.missed.length ? r.missed.length + ' document(s) couldn\'t be added: see the last page.' : 'Send it to ' + (c.provider || 'the maker or store') + '.');
+    } catch (e) { toast('Could not make the claim pack: ' + e.message.slice(0, 100)); btn.disabled = false; btn.textContent = 'Make claim pack'; }
   } else if (kind === 'prop') {
     const id = form.dataset.id;
     if (!v('name')) return;
@@ -1607,6 +2343,24 @@ ACT.impmerge = async (el) => {
   await saveImport(); await saveData(); closeSheet(); toast('Merged into ' + it.name); render();
 };
 
+/* PDF picked on the Snap screen: show its first page and read its text. */
+async function snapPdfDetails() {
+  const mine = SNAP;
+  try {
+    const t = await pdfThumbBlob(mine.file);
+    if (SNAP === mine) { const im = $('#snapprev'); if (im) im.src = URL.createObjectURL(t); }
+  } catch (e) { const im = $('#snapprev'); if (im) im.remove(); }
+  if (!S.autoRead || mine.pdfRead) return;
+  mine.pdfRead = true;
+  try {
+    const r = await readPdf(mine.file);
+    if (SNAP !== mine) return;
+    const n = fillEmpty(document.querySelector('form[data-form="snap"]'), r);
+    mine.ocrMsg = n ? 'Filled ' + n + ' detail' + (n > 1 ? 's' : '') + ' from the PDF. Check them before saving.' : 'No details found in the PDF text. If it\'s a scan, save it, then crop the receipt out of it.';
+  } catch (e) { mine.ocrMsg = 'Couldn\'t read this PDF. Type the details in.'; }
+  const m = $('#ocrmsg'); if (m) m.textContent = mine.ocrMsg;
+}
+
 /* ---------- start ---------- */
 async function boot() {
   try { S = Object.assign(defaultSettings(), JSON.parse(localStorage.getItem('og_settings') || '{}')); } catch (e) { S = defaultSettings(); }
@@ -1614,6 +2368,7 @@ async function boot() {
   await idb.open();
   D = (await idb.get('kv', 'data')) || emptyData();
   if (!D.lists) D.lists = JSON.parse(JSON.stringify(DEFAULT_LISTS));
+  COLLECTIONS.forEach((c) => { if (!D[c]) D[c] = {}; });
   const signedIn = await DBX.finishSignIn().catch((e) => { toast('Sign-in error: ' + e.message); return true; });
   if (location.search.includes('share=1')) history.replaceState(null, '', location.pathname + '#/inbox');
   await loadImport().catch(() => {});

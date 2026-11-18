@@ -3,13 +3,15 @@
 Purchases, receipts and warranties for everything we own, at home and at the rentals.
 Offline Android web app. Records live on the phone and sync through Dropbox.
 
-**Version 1.01** · App: https://sskehan.github.io/ourgear/
+**Version 1.03** · App: https://sskehan.github.io/ourgear/
 
 ## Files to upload to the repo
 
 - `index.html`, `app.js`, `styles.css`, `sw.js`, `manifest.webmanifest`, `README.md`
 - Icons: `icon.svg`, `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`
 - Receipt reader (v1.01): `tesseract.min.js`, `worker.min.js`, `tesseract-core-simd-lstm.wasm.js`, `eng.traineddata.gz`
+- PDF viewer (v1.02): `pdf.min.mjs`, `pdf.worker.min.mjs`, `openjpeg.wasm`, `jbig2.wasm`
+- PDF maker (v1.03): `pdf-lib.min.js`
 
 All files go in the main folder of the repo. No subfolders needed.
 
@@ -30,5 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.03: claims and fault log (Claims tab, timeline with tickets, contacts and attachments), one-tap claim pack PDF, insurance inventory (PDF and spreadsheet), service jobs with due dates, Send to Our Tax for work items
+- 1.02: view PDFs and photos inside the app (pages, zoom), PDF previews in lists, read store/date/total from PDF invoices, crop a receipt out of any PDF page (kept together with the PDF), share any file type to the app
 - 1.01: receipt reading on the phone (store, date, total), share notes and several files at once with details picked up from the note text, Evernote .enex import with review queue (Lifetime / Last 5 years / Older piles, duplicate check, merge, archive older in one go)
 - 1.0: first release
