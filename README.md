@@ -32,6 +32,9 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.09: Send to Our Tax hands the details and receipt straight to Our Tax (needs Our Tax 1.05, both apps installed from the same browser), sends it to the person the item belongs to, and shows the item as In Our Tax once saved there
+- 1.08: faster with thousands of items (Items list shows 100 at a time with Show more), sync skips the download when nothing changed, data file stored compressed. Update both phones on the same day
+- 1.07: full app name in the header (sync status moved underneath), easier-to-read text in a few colour schemes, clearer sync error
 - 1.06: item count on Home; five more colour schemes including a dark one; Edit picture for saved photos (crop, rotate, straighten, switch to black and white), replacing the file in Dropbox and refreshing the other phone
 - 1.05: Snap asks what you're adding (receipt, item photo, other document); item photos saved in colour with no form; boxes shown depend on the kind of file; "Belongs to" uses an editable people list (Settings > Lists) with a filter on Items
 - 1.04: fault report PDF (when and how it was reported, every follow-up, gaps with no contact), follow-up dates shown on Home, who-contacted-whom on updates, claim summary panel, new icons, Home tiles open matching lists, warranty filter on Items, service jobs screen, clearer forms

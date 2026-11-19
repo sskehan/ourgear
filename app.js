@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.08';
+const APP_VERSION = '1.09';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -1717,21 +1717,88 @@ function svcSheet(id, itemId) {
 }
 
 /* ---------- Send to Our Tax ---------- */
-function ourTaxLink(it) {
-  const rec = itemFiles(it.id).find((f) => (f.kind === 'Receipt' || f.kind === 'Tax invoice') && f.path);
-  const q = new URLSearchParams({ from: 'ourgear', item: it.id, desc: [it.name, it.brand, it.model].filter(Boolean).join(' '),
-    amount: it.price === '' || it.price == null ? '' : String(it.price), date: it.purchaseDate || '', store: it.store || '', receipt: rec ? rec.path : '' });
-  return OURTAX_URL + '#/expense?' + q.toString();
+/* Our Gear and Our Tax both live on sskehan.github.io, so on the same phone and browser they share this little
+   hand-off box: Our Gear leaves the details and receipt copies in it, Our Tax picks them up, and Our Tax leaves a
+   note back saying it was saved (or removed). */
+const HANDOFF = {
+  open() { return new Promise((res, rej) => { const r = indexedDB.open('ourapps-handoff', 1); r.onupgradeneeded = () => r.result.createObjectStore('box'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
+  async run(mode, fn) { const db = await this.open(); try { return await new Promise((res, rej) => { const t = db.transaction('box', mode); let out; const q = fn(t.objectStore('box')); if (q) q.onsuccess = () => { out = q.result; }; t.oncomplete = () => res(out); t.onerror = () => rej(t.error); }); } finally { db.close(); } },
+  put(k, v) { return this.run('readwrite', (os) => os.put(v, k)); },
+  async takeAll(prefix) {
+    const keys = (await this.run('readonly', (os) => os.getAllKeys())) || [], out = [];
+    for (const k of keys.filter((x) => String(x).startsWith(prefix))) { out.push(await this.run('readonly', (os) => os.get(k))); await this.run('readwrite', (os) => os.delete(k)); }
+    return out;
+  }
+};
+/* Whose claim: the person the item belongs to, if they're one of you two; otherwise Our Tax uses whoever's phone it is. */
+function taxPerson(it) { return ['Shaun', 'Lyndsey'].includes(it.owner) ? it.owner : ''; }
+function ourTaxDetails(it) {
+  const low = String(it.name || '').toLowerCase();
+  return { item: it.id, desc: [it.name, ...[it.brand, it.model].filter((x) => x && !low.includes(String(x).toLowerCase()))].filter(Boolean).join(' '), amount: it.price === '' || it.price == null ? '' : String(it.price),
+    date: it.purchaseDate || '', store: it.store || '', person: taxPerson(it) };
+}
+function ourTaxLink(it, hid) {
+  const q = new URLSearchParams(Object.assign({ gearitem: it.id }, ourTaxDetails(it), hid ? { gear: hid } : {}));
+  q.delete('item');
+  return OURTAX_URL + '?' + q.toString();
 }
 function ourTaxText(it) {
   return [it.name + (it.brand || it.model ? ' (' + [it.brand, it.model].filter(Boolean).join(' ') + ')' : ''), it.purchaseDate ? 'Bought ' + fmtDate(it.purchaseDate) : '',
     it.store ? 'From ' + it.store : '', it.price !== '' && it.price != null ? 'Price ' + fmtMoney(it.price) : ''].filter(Boolean).join('\n');
 }
+/* Get copies of the item's receipts (from this phone, or Dropbox) to hand over. */
+async function receiptCopies(it) {
+  const recs = itemFiles(it.id).filter((f) => RECEIPT_KINDS.includes(f.kind)).slice(0, 4), out = [];
+  let missing = 0;
+  for (const f of recs) {
+    try {
+      let b = await idb.get('blobs', f.id);
+      if (!b && f.path && DBX.connected() && navigator.onLine) { const r = await DBX.download(f.path); if (r) b = r.blob; }
+      if (b) out.push({ name: f.name || (f.kind + '.' + (/pdf/.test(f.mime || '') ? 'pdf' : 'jpg')), type: f.mime || b.type || 'image/jpeg', blob: b }); else missing++;
+    } catch (e) { missing++; }
+  }
+  return { files: out, missing, total: recs.length };
+}
+async function prepareSendToTax(it) {
+  openSheet('<h2>Send to Our Tax</h2><div class="muted">Getting the receipt ready…</div>');
+  const rc = await receiptCopies(it);
+  const hid = uid();
+  let boxed = true;
+  try { await HANDOFF.put('tax:' + hid, Object.assign(ourTaxDetails(it), { receipts: rc.files, at: Date.now() })); } catch (e) { boxed = false; }
+  try { await navigator.clipboard.writeText(ourTaxText(it)); } catch (e) { /* clipboard not allowed */ }
+  const person = taxPerson(it);
+  const rline = !rc.total ? 'No receipt saved for this item. You can add a photo in Our Tax.'
+    : rc.files.length === rc.total ? (rc.total === 1 ? 'The receipt goes with it.' : 'All ' + rc.total + ' receipts go with it.')
+    : rc.files.length + ' of ' + rc.total + ' receipts go with it (the rest need internet to fetch from Dropbox).';
+  openSheet('<h2>Send to Our Tax</h2>' +
+    '<div class="card pad"><div class="t" style="font-weight:700">' + esc(ourTaxDetails(it).desc) + '</div><div class="muted">' +
+    esc([it.price !== '' && it.price != null ? fmtMoney(it.price) : 'No price', it.purchaseDate ? fmtDate(it.purchaseDate) : '', it.store || ''].filter(Boolean).join(' · ')) + '</div></div>' +
+    '<p>Goes to <b>' + esc(person ? person + '’s' : 'this phone’s') + '</b> claims' + (person ? '' : ' (it doesn’t belong to Shaun or Lyndsey, so you can choose in Our Tax)') + '. ' + esc(rline) + '</p>' +
+    '<p class="muted">You set the work use % in Our Tax, then tap Save expense. The details are also copied, ready to paste.</p>' +
+    (boxed ? '' : '<p class="muted">This browser couldn’t hold the receipt for Our Tax, so add the photo there.</p>') +
+    '<a class="btn primary" target="_blank" rel="noopener" data-act="taxopened" data-id="' + it.id + '" href="' + esc(ourTaxLink(it, boxed ? hid : '')) + '">Open Our Tax</a>' +
+    '<button class="btn quiet" data-act="closesheet">Cancel</button>');
+}
+/* Notes left by Our Tax: saved (show it on the item) or removed (clear it). */
+async function collectTaxNotes() {
+  let notes = [];
+  try { notes = await HANDOFF.takeAll('gear:'); } catch (e) { return; }
+  let changed = false;
+  for (const n of notes) {
+    const it = n && D.items[n.itemId]; if (!it) continue;
+    if (n.removed) { if (it.taxClaim && (!n.expenseId || it.taxClaim.expenseId === n.expenseId)) { delete it.taxClaim; it.sentToTax = ''; touch(it); changed = true; } }
+    else { it.taxClaim = { expenseId: n.expenseId, person: n.person || '', fy: n.fy || '', pct: n.pct, claim: n.claim, savedAt: n.at || Date.now() }; touch(it); changed = true; }
+  }
+  if (changed) { await saveData(); render(); }
+}
 function ourTaxHTML(it) {
-  if (!it.work) return '';
+  if (!it.work && !it.taxClaim) return '';
+  const tc = it.taxClaim;
   return '<div class="card pad form"><div class="t" style="font-weight:700">Work deduction</div>' +
-    (it.sentToTax ? '<div class="muted">Sent to Our Tax on ' + esc(fmtDate(it.sentToTax)) + '.</div>' : '<div class="muted">Not sent to Our Tax yet.</div>') +
-    '<button class="btn' + (it.sentToTax ? ' quiet' : ' primary') + '" data-act="sendtax" data-id="' + it.id + '">' + (it.sentToTax ? 'Send again' : 'Send to Our Tax') + '</button></div>';
+    (tc ? '<div><span class="badge b-ok">In Our Tax</span></div><div class="muted">' + esc([tc.person ? tc.person + '’s claims' : '', tc.fy ? tc.fy + ' tax year' : '', tc.pct != null ? tc.pct + '% work use' : '', tc.claim != null ? fmtMoney(tc.claim) + ' recorded' : ''].filter(Boolean).join(' · ')) + '</div>' +
+      '<a class="btn" target="_blank" rel="noopener" href="' + esc(OURTAX_URL + '?gearitem=' + encodeURIComponent(it.id)) + '">Open in Our Tax</a>'
+    : (it.sentToTax ? '<div class="muted">Opened in Our Tax on ' + esc(fmtDate(it.sentToTax)) + ' but not saved there yet.</div>' : '<div class="muted">Not in Our Tax yet.</div>') +
+      '<button class="btn primary" data-act="sendtax" data-id="' + it.id + '">Send to Our Tax</button>') + '</div>';
 }
 
 function viewService() {
@@ -2353,13 +2420,8 @@ const ACT = {
     await saveData(); toast('Marked done. Next due ' + fmtDate(serviceStatus(s).next)); render();
   },
   async delsvc(el) { if (!confirm('Delete this service job?')) return; const s = D.services[el.dataset.id]; s.deleted = true; touch(s); await saveData(); closeSheet(); render(); },
-  async sendtax(el) {
-    const it = D.items[el.dataset.id];
-    try { await navigator.clipboard.writeText(ourTaxText(it)); } catch (e) { /* clipboard not allowed */ }
-    window.open(ourTaxLink(it), '_blank');
-    it.sentToTax = todayISO(); touch(it); await saveData(); render();
-    toast('Sent to Our Tax. The details are also copied, ready to paste.');
-  },
+  async sendtax(el) { await prepareSendToTax(D.items[el.dataset.id]); },
+  async taxopened(el) { const it = D.items[el.dataset.id]; closeSheet(); if (it && !it.taxClaim) { it.sentToTax = todayISO(); touch(it); await saveData(); render(); } },
   async invpdf(el) {
     el.disabled = true; el.textContent = 'Making PDF…';
     try { const bytes = await buildInventoryPdf(); readySheet(new Blob([bytes], { type: 'application/pdf' }), 'Contents-inventory-' + todayISO() + '.pdf', 'Inventory ready', inventoryRows().length + ' items'); }
@@ -2407,7 +2469,7 @@ const ACT = {
 document.addEventListener('click', (e) => {
   const el = e.target.closest('[data-act]');
   if (!el || el.tagName === 'INPUT') return;
-  if (el.dataset.act in ACT) { e.preventDefault(); ACT[el.dataset.act](el, e); }
+  if (el.dataset.act in ACT) { if (!(el.tagName === 'A' && el.target === '_blank')) e.preventDefault(); ACT[el.dataset.act](el, e); }
 });
 document.addEventListener('change', async (e) => {
   const t = e.target;
@@ -2674,7 +2736,8 @@ async function boot() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   window.addEventListener('online', () => scheduleSync());
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleSync(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { collectTaxNotes(); scheduleSync(); } });
+  collectTaxNotes();
   window.addEventListener('resize', () => { if (SNAP && SNAP.step === 'crop') drawCropView(); });
   if (DBX.connected()) sync(!!signedIn);
 }
