@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.11';
+const APP_VERSION = '1.12';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -2350,6 +2350,23 @@ async function archiveFilesOf(it) {
     if (f.uploaded) await dropThumb(f.id);
   }
 }
+/* Copy a file's details form onto the file. Returns true if anything changed. */
+function applyFileForm(form) {
+  const f = D.files[form.dataset.id]; if (!f) return false;
+  const fd = new FormData(form), v = (k) => (fd.get(k) || '').toString().trim();
+  const before = JSON.stringify([f.kind, f.date, f.store, f.total]);
+  f.kind = v('kind');
+  const g = kindGroup(f.kind);
+  if (g !== 'photo') f.date = v('date');
+  f.store = g === 'receipt' ? v('store') : ''; f.total = g === 'receipt' && v('total') !== '' ? +v('total') : '';
+  if (JSON.stringify([f.kind, f.date, f.store, f.total]) === before) return false;
+  touch(f); return true;
+}
+/* Buttons that leave a file's details (File to item, New item, Edit picture…) keep what you've chosen or typed. */
+async function keepFileForm() {
+  const form = $('#sheet form[data-form="file"]');
+  if (form && applyFileForm(form)) await saveData();
+}
 let VIEW_BACK = null;
 function reopenFileSheet() {
   const b = VIEW_BACK; VIEW_BACK = null;
@@ -2404,11 +2421,11 @@ const ACT = {
   addfile(el) { addFileSheet(el.dataset.id); },
   filesheet(el) { fileSheet(el.dataset.id, el.dataset.item); },
   closesheet() { closeSheet(); },
-  splitgo(el) { closeSheet(); go('#/split/' + el.dataset.id); },
+  async splitgo(el) { await keepFileForm(); closeSheet(); go('#/split/' + el.dataset.id); },
   splitrow() { $('#splitrows').insertAdjacentHTML('beforeend', splitRowHTML(SPLIT_N++, false)); const r = $('#splitrows').lastElementChild; r.querySelector('input').focus(); splitUpdate(); },
   splitdel(el) { el.closest('[data-row]').remove(); splitUpdate(); },
   openfile(el) { openFile(D.files[el.dataset.id]); },
-  picker(el) { openPicker(el.dataset.id, el.dataset.mode, el.dataset.from); },
+  async picker(el) { await keepFileForm(); openPicker(el.dataset.id, el.dataset.mode, el.dataset.from); },
   async pick(el) {
     const f = D.files[el.dataset.file], to = el.dataset.id, mode = el.dataset.mode;
     if (mode === 'also') { attachFile(f, to); await saveData(); closeSheet(); render(); toast('Added to ' + D.items[to].name + '. Stored once, shown on both.'); return; }
@@ -2421,11 +2438,13 @@ const ACT = {
     await saveData(); closeSheet(); ITEM_TAB = 'files'; go('#/item/' + f.itemId); toast('Filed');
   },
   async unfile(el) {
+    await keepFileForm();
     const f = D.files[el.dataset.id], from = el.dataset.from;
     if (from && isShared(f)) { const name = D.items[from].name; detachFile(f, from); await saveData(); closeSheet(); render(); toast('Removed from ' + name); return; }
     f.itemId = null; delete f.alsoItems; touch(f); await saveData(); closeSheet(); render(); toast('Moved to inbox');
   },
-  newfromfile(el) {
+  async newfromfile(el) {
+    await keepFileForm();
     const f = D.files[el.dataset.id];
     const grp = f.itemId ? [f] : groupFiles(f);
     NEW_ITEM_PREFILL = { name: (f.title || '').slice(0, 80), notes: f.note || '', store: f.store || '', purchaseDate: f.date || '', price: f.total === undefined ? '' : f.total,
@@ -2442,6 +2461,7 @@ const ACT = {
   cropall() { SNAP.crop = { x: 0, y: 0, w: SNAP.work.width, h: SNAP.work.height }; placeCropRect(); },
   docmode(el) { SNAP.docMode = !SNAP.docMode; el.setAttribute('aria-pressed', SNAP.docMode); el.textContent = SNAP.docMode ? 'Black and white' : 'Colour'; },
   async editpic(el) {
+    await keepFileForm();
     const f = D.files[el.dataset.id];
     el.disabled = true; el.textContent = 'Opening picture…';
     try {
@@ -2707,12 +2727,7 @@ document.addEventListener('submit', async (e) => {
     form.querySelectorAll('button').forEach((b) => { b.disabled = true; });
     await saveSnapFile(dest);
   } else if (kind === 'file') {
-    const f = D.files[form.dataset.id];
-    f.kind = v('kind');
-    const g = kindGroup(f.kind);
-    if (g !== 'photo') f.date = v('date');
-    f.store = g === 'receipt' ? v('store') : ''; f.total = g === 'receipt' && v('total') !== '' ? +v('total') : '';
-    touch(f); await saveData(); closeSheet(); render(); toast('Saved');
+    applyFileForm(form); await saveData(); closeSheet(); render(); toast('Saved');
   } else if (kind === 'draft') {
     const d = IMP.drafts[form.dataset.id], act = e.submitter ? e.submitter.value : 'accept';
     if (act === 'skip') {

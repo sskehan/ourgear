@@ -32,6 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.12: choices and typing in a file's details (What is it?, date, store, total) are kept when you tap File to item, New item from this, Several items, Add to / Move to another item, Back to inbox or Edit picture. The ✕ still closes without saving
 - 1.11: viewing a receipt or photo from its details no longer loses what you'd typed (date, store, total, kind); the details come back when you close the picture
 - 1.10: several items on one receipt (one screen, one row per item, running total against the receipt; the receipt is stored once and shows on every item); add a receipt to another item, remove it from one item, and archiving or deleting one item keeps the receipt for the others; forms are no longer cleared when a sync finishes while you're typing
 - 1.09: Send to Our Tax hands the details and receipt straight to Our Tax (needs Our Tax 1.05, both apps installed from the same browser), sends it to the person the item belongs to, and shows the item as In Our Tax once saved there
