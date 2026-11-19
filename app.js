@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.07';
+const APP_VERSION = '1.08';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -95,7 +95,7 @@ function defaultSettings() {
 }
 function live(coll) { return Object.values(D[coll] || {}).filter((r) => !r.deleted); }
 const COLLECTIONS = ['items', 'warranties', 'files', 'claims', 'logs', 'services'];
-function touch(rec) { rec.updatedAt = Date.now(); rec.by = S ? S.owner : ''; return rec; }
+function touch(rec) { if (typeof LOG_IDX !== 'undefined') LOG_IDX = null; rec.updatedAt = Date.now(); rec.by = S ? S.owner : ''; return rec; }
 function itemWarranties(itemId) { return live('warranties').filter((w) => w.itemId === itemId); }
 function itemFiles(itemId) { return live('files').filter((f) => f.itemId === itemId); }
 function inboxFiles() { return live('files').filter((f) => !f.itemId || !D.items[f.itemId] || D.items[f.itemId].deleted); }
@@ -108,6 +108,7 @@ function propName(id) { const p = propById(id); return p ? p.name : 'No property
 function mergeInto(local, remote) {
   let changed = false;
   COLLECTIONS.forEach((c) => {
+    if (typeof LOG_IDX !== 'undefined') LOG_IDX = null;
     if (!local[c]) local[c] = {};
     const L = local[c], R = (remote && remote[c]) || {};
     Object.keys(R).forEach((id) => {
@@ -327,6 +328,18 @@ function stableStringify(v) {
   if (v && typeof v === 'object') return '{' + Object.keys(v).sort().filter((k) => v[k] !== undefined).map((k) => JSON.stringify(k) + ':' + stableStringify(v[k])).join(',') + '}';
   return JSON.stringify(v === undefined ? null : v);
 }
+/* Small fingerprint of the data text, so an unchanged file needn't be downloaded again. */
+function textHash(t) { let h1 = 0x811c9dc5, h2 = 0x01000193; for (let i = 0; i < t.length; i++) { const c = t.charCodeAt(i); h1 = Math.imul(h1 ^ c, 16777619); h2 = Math.imul(h2 + c, 2246822519); } return t.length + ':' + (h1 >>> 0).toString(36) + ':' + (h2 >>> 0).toString(36); }
+/* The data file is stored compressed (about a tenth of the size). Older plain files are still read. */
+async function packData(text) {
+  if (typeof CompressionStream === 'undefined') return new Blob([text], { type: 'application/json' });
+  return new Response(new Blob([text]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+}
+async function unpackData(blob) {
+  const head = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
+  if (head[0] === 0x1f && head[1] === 0x8b) return JSON.parse(await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text());
+  return JSON.parse(await blob.text());
+}
 async function sync(manual) {
   if (!DBX.connected() || !navigator.onLine) { if (manual) toast(navigator.onLine ? 'Connect Dropbox in Settings first' : 'No internet connection'); return; }
   if (!manual && S.wifiOnly && onCellular()) return;
@@ -334,20 +347,29 @@ async function sync(manual) {
   syncing = true; setSyncMsg('Syncing…');
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
-      const remote = await DBX.download(DATA_PATH);
-      let remoteText = null, rev = null;
-      if (remote) {
-        rev = remote.meta.rev;
-        const rd = JSON.parse(await remote.blob.text());
-        remoteText = stableStringify(rd);
-        if (mergeInto(D, rd)) await idb.put('kv', 'data', D);
+      // Kept in the same store as the data, so if one is wiped the other is too.
+      const last = (await idb.get('kv', 'syncstate')) || {};
+      let remoteHash = null, rev = null;
+      let meta = null;
+      try { meta = await DBX.rpc('files/get_metadata', { path: DATA_PATH }); } catch (e) { if (!/not_found/.test(e.summary)) throw e; }
+      if (meta && last.rev && meta.rev === last.rev) {
+        rev = meta.rev; remoteHash = last.hash; // nothing new from the other phone
+      } else if (meta) {
+        const remote = await DBX.download(DATA_PATH);
+        if (remote) {
+          rev = remote.meta.rev;
+          const rd = await unpackData(remote.blob);
+          remoteHash = textHash(stableStringify(rd));
+          if (mergeInto(D, rd)) await idb.put('kv', 'data', D);
+        }
       }
       await reconcileFiles();
       await idb.put('kv', 'data', D);
-      const text = stableStringify(D);
-      if (text === remoteText) break; // nothing new to send
+      const hash = textHash(stableStringify(D));
+      if (hash === remoteHash) { await idb.put('kv', 'syncstate', { rev, hash }); break; } // nothing new to send
       try {
-        await DBX.upload(DATA_PATH, new Blob([text], { type: 'application/json' }), rev ? { '.tag': 'update', update: rev } : { '.tag': 'add' });
+        const res = await DBX.upload(DATA_PATH, await packData(stableStringify(D)), rev ? { '.tag': 'update', update: rev } : { '.tag': 'add' });
+        await idb.put('kv', 'syncstate', { rev: res.rev, hash });
         break;
       } catch (e) {
         if (e.status === 409 && attempt < 2) continue; // the other phone saved first: pull again and merge
@@ -665,6 +687,7 @@ function syncButton() {
 
 /* ---------- views ---------- */
 let ITEMS_F = { q: '', prop: 'all', cat: '', arch: false, st: 'all', owner: '' };
+const ITEMS_PAGE = 100; let ITEMS_SHOWN = ITEMS_PAGE;
 const ST_FILTERS = [['all', 'Any warranty'], ['soon', 'Expiring soon'], ['ok', 'Covered'], ['life', 'Lifetime'], ['gone', 'Expired'], ['nowar', 'No warranty']];
 let ITEM_TAB = 'details';
 let SNAP_TARGET = null;
@@ -732,9 +755,12 @@ function itemsListHTML() {
   const cnt = document.getElementById('itemcount');
   if (cnt) cnt.textContent = rows.length + ' item' + (rows.length === 1 ? '' : 's');
   if (!rows.length) return '<div class="card empty">' + (live('items').length ? 'No items match.' : 'No items yet. Snap a receipt or tap + to add one.') + '</div>';
-  return '<div class="card list">' + rows.map(({ i, st }) =>
+  const openFor = new Set(live('claims').filter(isOpenClaim).map((c) => c.itemId));
+  const more = rows.length - ITEMS_SHOWN;
+  return '<div class="card list">' + rows.slice(0, ITEMS_SHOWN).map(({ i, st }) =>
     '<a class="row" href="#/item/' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
-    esc([i.owner && i.owner !== 'Shared' ? i.owner + '\'s' : '', i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : ''), live('claims').some((c) => c.itemId === i.id && isOpenClaim(c)) ? 'claim open' : ''].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>';
+    esc([i.owner && i.owner !== 'Shared' ? i.owner + '\'s' : '', i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : ''), openFor.has(i.id) ? 'claim open' : ''].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>' +
+    (more > 0 ? '<button class="btn quiet" data-act="itemsmore">Show ' + Math.min(more, ITEMS_PAGE) + ' more (' + more + ' not shown)</button>' : '');
 }
 function viewItems() {
   const props = D.lists.properties;
@@ -746,7 +772,7 @@ function viewItems() {
   h += '<div class="grid2"><label class="field"><span>Warranty</span><select id="fst">' + ST_FILTERS.map(([k, l]) => opt(k, ITEMS_F.st, l)).join('') + '</select></label>' +
     '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label></div>' +
     '<label class="field"><span>Belongs to</span><select id="fowner">' + opt('', ITEMS_F.owner, 'Anyone') + peopleList().map((o) => opt(o, ITEMS_F.owner)).join('') + '</select></label>';
-  h += '<div class="muted" id="itemcount"></div><div id="itemlist">' + itemsListHTML() + '</div></main>';
+  h += '<div class="muted" id="itemcount"></div><div id="itemlist"></div></main>';
   return h + nav('items');
 }
 
@@ -1521,7 +1547,11 @@ function claimBadge(c) { return { kind: { Open: 'soon', Waiting: 'life', Resolve
 function isOpenClaim(c) { return c.status === 'Open' || c.status === 'Waiting'; }
 function itemClaims(itemId) { return live('claims').filter((c) => c.itemId === itemId).sort((a, b) => (isOpenClaim(b) - isOpenClaim(a)) || (b.opened || '').localeCompare(a.opened || '')); }
 function sortLogs(a, b) { return (b.date || '').localeCompare(a.date || '') || (b.createdAt || 0) - (a.createdAt || 0); }
-function claimLogs(claimId) { return live('logs').filter((l) => l.claimId === claimId).sort(sortLogs); }
+let LOG_IDX = null; // claim id -> its entries, rebuilt after any change
+function claimLogs(claimId) {
+  if (!LOG_IDX) { LOG_IDX = {}; live('logs').forEach((l) => { if (l.claimId) (LOG_IDX[l.claimId] = LOG_IDX[l.claimId] || []).push(l); }); Object.values(LOG_IDX).forEach((a) => a.sort(sortLogs)); }
+  return (LOG_IDX[claimId] || []).slice();
+}
 function itemLogs(itemId) { return live('logs').filter((l) => l.itemId === itemId).sort(sortLogs); }
 function liveItem(id) { const it = D.items[id]; return it && !it.deleted ? it : null; }
 function openClaims() { return live('claims').filter((c) => isOpenClaim(c) && liveItem(c.itemId)); }
@@ -2081,6 +2111,7 @@ async function buildFaultReport(c) {
 /* ---------- routing ---------- */
 function render() {
   const app = $('#app'); if (!app || !D) return;
+  LOG_IDX = null;
   const h = location.hash || '#/home';
   const parts = h.replace(/^#\//, '').split('/');
   let html;
@@ -2126,8 +2157,9 @@ window.addEventListener('hashchange', () => {
 const ACT = {
   syncnow() { sync(true); },
   tab(el) { ITEM_TAB = el.dataset.v; render(); },
-  fprop(el) { ITEMS_F.prop = el.dataset.v; render(); },
-  farch() { ITEMS_F.arch = !ITEMS_F.arch; render(); },
+  fprop(el) { ITEMS_F.prop = el.dataset.v; ITEMS_SHOWN = ITEMS_PAGE; render(); },
+  farch() { ITEMS_F.arch = !ITEMS_F.arch; ITEMS_SHOWN = ITEMS_PAGE; render(); },
+  itemsmore() { ITEMS_SHOWN += ITEMS_PAGE; const l = $('#itemlist'); if (l) l.innerHTML = itemsListHTML(); },
   async archive(el) {
     const it = D.items[el.dataset.id];
     it.archived = true; it.archivedAt = Date.now(); touch(it);
@@ -2287,7 +2319,7 @@ const ACT = {
   vzoom(el) { if (!VIEW) return; VIEW.zoom = Math.min(3, Math.max(1, VIEW.zoom + (+el.dataset.v) * 0.5)); drawViewer(); },
   async vcrop(el) { el.disabled = true; el.textContent = 'Preparing page…'; try { await cropFromPdfPage(+el.dataset.v); } catch (e) { toast('Could not open that page: ' + e.message.slice(0, 80)); el.disabled = false; } },
   gofilter(el) {
-    ITEMS_F = Object.assign(ITEMS_F, { st: 'all', q: '', prop: 'all', cat: '', arch: false, owner: '' });
+    ITEMS_F = Object.assign(ITEMS_F, { st: 'all', q: '', prop: 'all', cat: '', arch: false, owner: '' }); ITEMS_SHOWN = ITEMS_PAGE;
     const k = el.dataset.k || 'st', v = el.dataset.v;
     if (k === 'st') ITEMS_F.st = v; else if (k === 'prop') ITEMS_F.prop = v || 'all'; else if (k === 'owner') ITEMS_F.owner = v; else if (k === 'cat') ITEMS_F.cat = v;
     go('#/items');
@@ -2381,7 +2413,7 @@ document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.dataset && t.dataset.act === 'wifionly') { ACT.wifionly(t); return; }
   if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) { const cl = CLAIM_TARGET; await startSnap(f, SNAP_TARGET, cl ? 'photo' : SNAP_TYPE); if (SNAP) SNAP.claimId = cl; } return; }
-  if (t.id === 'fcat') { ITEMS_F.cat = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
+  if (t.id === 'fcat') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.cat = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'claimStatus') {
     const c = D.claims[t.dataset.id]; c.status = t.value;
     if (!isOpenClaim(c) && !c.closed) c.closed = todayISO();
@@ -2390,8 +2422,8 @@ document.addEventListener('change', async (e) => {
     touch(c); await saveData(); render(); toast('Status: ' + c.status); return;
   }
   if (t.dataset && t.dataset.kindsel !== undefined) { applyKindFields(t); return; }
-  if (t.id === 'fowner') { ITEMS_F.owner = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
-  if (t.id === 'fst') { ITEMS_F.st = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
+  if (t.id === 'fowner') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.owner = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
+  if (t.id === 'fst') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.st = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'repProp') { REP.prop = t.value; render(); return; }
   if (t.id === 'repArch') { REP.arch = t.checked; render(); return; }
   if (t.id === 'ownerSel') { S.owner = t.value; saveSettings(); toast('Saved'); return; }
@@ -2403,7 +2435,7 @@ document.addEventListener('change', async (e) => {
 });
 document.addEventListener('input', (e) => {
   const t = e.target;
-  if (t.id === 'q') { ITEMS_F.q = t.value; $('#itemlist').innerHTML = itemsListHTML(); }
+  if (t.id === 'q') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.q = t.value; $('#itemlist').innerHTML = itemsListHTML(); }
   if (t.id === 'pickq') { $('#picklist').innerHTML = pickerList(t.dataset.file, t.value); }
   if (t.id === 'deg') { $('#degv').textContent = t.value + '°'; }
   if (t.closest && t.closest('[data-form="warranty"]')) warrantyPreview();
