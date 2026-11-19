@@ -51,7 +51,7 @@ a { color: var(--accent-text); }
 .hdr { background: var(--hdr-bg); color: var(--hdr-text); border-bottom: 1px solid var(--hdr-line); padding: 14px 16px 12px; position: sticky; top: 0; z-index: 5; }
 .hdr-row { display: flex; align-items: center; gap: 10px; min-height: 44px; }
 .hdr h1 { margin: 0; font-size: 21px; font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hdr .sub { font-size: 12.5px; color: var(--hdr-muted); }
+.hdr .sub { font-size: 12.5px; color: var(--hdr-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .hdr .sync { font-size: 12px; color: var(--hdr-muted); text-align: right; }
 .iconbtn { width: 44px; height: 44px; border: 0; background: transparent; color: inherit; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; cursor: pointer; flex: none; text-decoration: none; }
 .iconbtn:active { background: rgba(127,127,127,.15); }
@@ -194,3 +194,8 @@ button.stat { text-align: left; cursor: pointer; font: inherit; color: var(--tex
 /* v1.06: item count on Home */
 .statwide { display: flex; justify-content: space-between; align-items: center; }
 .statwide .n { font-size: 24px; }
+/* 1.07 readability fixes */
+.entry-in .muted { color: #4B5563; }
+[data-theme="night"] .entry-in .muted { color: #C7CED9; }
+[data-theme="emerald"] .chip[aria-pressed="true"], [data-theme="sky"] .chip[aria-pressed="true"], [data-theme="midnight"] .chip[aria-pressed="true"] { background: var(--accent-text); border-color: var(--accent-text); }
+[data-theme="night"] .btn.danger { border-color: #7F1D1D; color: #FCA5A5; }

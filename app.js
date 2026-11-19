@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.06';
+const APP_VERSION = '1.07';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -358,8 +358,10 @@ async function sync(manual) {
     if (manual) toast('Synced');
     render();
   } catch (e) {
-    syncing = false; setSyncMsg('Sync failed: ' + e.message.slice(0, 80));
-    if (manual) toast('Sync failed: ' + e.message.slice(0, 120));
+    syncing = false;
+    const why = /failed to fetch|networkerror|load failed/i.test(e.message || '') ? "couldn't reach Dropbox" : (e.message || 'unknown error');
+    setSyncMsg('Sync failed: ' + why.slice(0, 80));
+    if (manual) toast('Sync failed: ' + why.slice(0, 120));
   } finally {
     syncing = false;
     if (syncAgain) { syncAgain = false; scheduleSync(); }
@@ -646,7 +648,7 @@ function header(title, opts) {
   const o = opts || {};
   return '<header class="hdr"><div class="hdr-row">' +
     (o.back ? '<a class="iconbtn" href="' + esc(o.back) + '" aria-label="Back">' + I.back + '</a>' : (o.logo ? logoSVG(36) : '')) +
-    '<div style="flex:1;min-width:0"><h1>' + esc(title) + '</h1>' + (o.sub ? '<div class="sub">' + esc(o.sub) + '</div>' : '') + '</div>' +
+    '<div style="flex:1;min-width:0"><h1>' + esc(title) + '</h1>' + (o.sub ? '<div class="sub"' + (o.subId ? ' id="' + o.subId + '"' : '') + '>' + esc(o.sub) + '</div>' : '') + '</div>' +
     (o.right || '') + '</div>' + (o.extra || '') + '</header>';
 }
 function nav(active) {
@@ -680,7 +682,7 @@ function viewHome() {
   soon.sort((a, b) => a.s.days - b.s.days);
   const sugg = items.filter((i) => suggestArchive(i, byItem[i.id] || []));
   const inbox = inboxFiles().length;
-  let h = header('Our Gear', { logo: true, right: '<div class="sync" id="syncmsg">' + esc(syncLabel()) + '</div>' + syncButton() });
+  let h = header('Our Gear', { logo: true, sub: syncLabel(), subId: 'syncmsg', right: syncButton() });
   h += '<main>';
   h += '<a class="btn primary big" href="#/snap">' + I.cam + 'Snap a receipt</a>';
   h += '<a class="stat statwide" href="#/items"><div class="l">Items in Our Gear</div><div class="n">' + items.length + '</div></a>';
