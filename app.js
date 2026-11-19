@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.10';
+const APP_VERSION = '1.11';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -1007,10 +1007,12 @@ function viewSettings() {
 function openSheet(html) { const s = $('#sheet'); s.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>'; s.hidden = false; hydrateThumbs(); }
 function closeSheet() { const s = $('#sheet'); s.hidden = true; s.innerHTML = ''; }
 function sheetHead(t) { return '<div class="sheet-head"><h2>' + esc(t) + '</h2><button class="iconbtn" data-act="closesheet" aria-label="Close">✕</button></div>'; }
+let SHEET_CTX = null;
 function fileSheet(id, ctx) {
   const f = D.files[id]; if (!f) return;
   const on = fileItemIds(f);
   ctx = ctx && on.includes(ctx) ? ctx : on[0] || null;
+  SHEET_CTX = ctx;
   const it = ctx ? D.items[ctx] : null;
   let h = sheetHead(f.kind || 'File');
   h += '<img class="preview" data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
@@ -2336,7 +2338,7 @@ window.addEventListener('hashchange', () => {
   if (r !== 'snap') { SNAP_TARGET = null; CLAIM_TARGET = null; SNAP_TYPE = 'receipt'; }
   if (r !== 'new') { /* keep prefill only for the new-item screen */ if (lastRoute === 'new') NEW_ITEM_PREFILL = null; }
   lastRoute = r;
-  closeSheet(); closeViewer(); render(); window.scrollTo(0, 0);
+  VIEW_BACK = null; closeSheet(); closeViewer(); render(); window.scrollTo(0, 0);
 });
 
 /* ---------- actions ---------- */
@@ -2347,6 +2349,15 @@ async function archiveFilesOf(it) {
     if (inUse.length) { if (f.itemId === it.id) { f.alsoItems = [...fileItemIds(f).filter((x) => x !== inUse[0])]; f.itemId = inUse[0]; touch(f); } continue; }
     if (f.uploaded) await dropThumb(f.id);
   }
+}
+let VIEW_BACK = null;
+function reopenFileSheet() {
+  const b = VIEW_BACK; VIEW_BACK = null;
+  if (!b || !D.files[b.id] || D.files[b.id].deleted) return;
+  fileSheet(b.id, b.ctx);
+  const form = $('#sheet form[data-form="file"]'); if (!form) return;
+  for (const [k, val] of Object.entries(b.vals)) { const el = form.elements[k]; if (el) el.value = val; }
+  const sel = form.querySelector('[data-kindsel]'); if (sel) applyKindFields(sel);
 }
 const ACT = {
   syncnow() { sync(true); },
@@ -2523,9 +2534,14 @@ const ACT = {
     if (!confirm('Cancel the import? Notes not yet accepted are dropped. Items already added stay.')) return;
     await clearImport(); render();
   },
-  viewfile(el) { openViewer(el.dataset.id); },
-  vclose() { closeViewer(); },
-  vext() { const f = VIEW && VIEW.f; closeViewer(); if (f) openFile(f); },
+  viewfile(el) {
+    // Opened from a file's details: remember what's been typed, and bring the details back when the picture is closed.
+    const form = el.closest('#sheet') && $('#sheet form[data-form="file"]');
+    VIEW_BACK = form ? { id: form.dataset.id, ctx: SHEET_CTX, vals: Object.fromEntries(new FormData(form).entries()) } : null;
+    openViewer(el.dataset.id);
+  },
+  vclose() { closeViewer(); reopenFileSheet(); },
+  vext() { const f = VIEW && VIEW.f; closeViewer(); reopenFileSheet(); if (f) openFile(f); },
   vzoom(el) { if (!VIEW) return; VIEW.zoom = Math.min(3, Math.max(1, VIEW.zoom + (+el.dataset.v) * 0.5)); drawViewer(); },
   async vcrop(el) { el.disabled = true; el.textContent = 'Preparing page…'; try { await cropFromPdfPage(+el.dataset.v); } catch (e) { toast('Could not open that page: ' + e.message.slice(0, 80)); el.disabled = false; } },
   gofilter(el) {
