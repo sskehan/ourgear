@@ -32,6 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.10: several items on one receipt (one screen, one row per item, running total against the receipt; the receipt is stored once and shows on every item); add a receipt to another item, remove it from one item, and archiving or deleting one item keeps the receipt for the others; forms are no longer cleared when a sync finishes while you're typing
 - 1.09: Send to Our Tax hands the details and receipt straight to Our Tax (needs Our Tax 1.05, both apps installed from the same browser), sends it to the person the item belongs to, and shows the item as In Our Tax once saved there
 - 1.08: faster with thousands of items (Items list shows 100 at a time with Show more), sync skips the download when nothing changed, data file stored compressed. Update both phones on the same day
 - 1.07: full app name in the header (sync status moved underneath), easier-to-read text in a few colour schemes, clearer sync error

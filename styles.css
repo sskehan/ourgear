@@ -199,3 +199,7 @@ button.stat { text-align: left; cursor: pointer; font: inherit; color: var(--tex
 [data-theme="night"] .entry-in .muted { color: #C7CED9; }
 [data-theme="emerald"] .chip[aria-pressed="true"], [data-theme="sky"] .chip[aria-pressed="true"], [data-theme="midnight"] .chip[aria-pressed="true"] { background: var(--accent-text); border-color: var(--accent-text); }
 [data-theme="night"] .btn.danger { border-color: #7F1D1D; color: #FCA5A5; }
+/* 1.10 several items on one receipt */
+.splitrow { display: flex; flex-direction: column; gap: 10px; }
+.splithead { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
+.splithead .iconbtn { font-size: 24px; margin: -6px -8px -6px 0; }

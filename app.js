@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.09';
+const APP_VERSION = '1.10';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -97,7 +97,26 @@ function live(coll) { return Object.values(D[coll] || {}).filter((r) => !r.delet
 const COLLECTIONS = ['items', 'warranties', 'files', 'claims', 'logs', 'services'];
 function touch(rec) { if (typeof LOG_IDX !== 'undefined') LOG_IDX = null; rec.updatedAt = Date.now(); rec.by = S ? S.owner : ''; return rec; }
 function itemWarranties(itemId) { return live('warranties').filter((w) => w.itemId === itemId); }
-function itemFiles(itemId) { return live('files').filter((f) => f.itemId === itemId); }
+/* A file sits with one item (f.itemId, which decides its Dropbox folder) and can also be on other items (f.alsoItems),
+   e.g. one invoice for several things. It's stored once. */
+function fileOn(f, itemId) { return f.itemId === itemId || (f.alsoItems || []).includes(itemId); }
+function itemFiles(itemId) { return live('files').filter((f) => fileOn(f, itemId)); }
+function fileItemIds(f) { return [f.itemId, ...(f.alsoItems || [])].filter((id) => id && D.items[id] && !D.items[id].deleted); }
+function isShared(f) { return fileItemIds(f).length > 1; }
+/* Take a file off one item. If that was its main item, another item it's on takes over (one still in use first).
+   Returns true if the file is still on at least one item. */
+function detachFile(f, itemId) {
+  const others = fileItemIds(f).filter((id) => id !== itemId);
+  if (f.itemId === itemId) { const next = others.find((id) => !D.items[id].archived) || others[0] || null; f.itemId = next; f.alsoItems = others.filter((id) => id !== next); }
+  else f.alsoItems = (f.alsoItems || []).filter((id) => id !== itemId);
+  if (!f.alsoItems.length) delete f.alsoItems;
+  touch(f); return !!f.itemId;
+}
+function attachFile(f, itemId) {
+  if (fileOn(f, itemId)) return;
+  if (!f.itemId) f.itemId = itemId; else f.alsoItems = [...(f.alsoItems || []), itemId];
+  touch(f);
+}
 function inboxFiles() { return live('files').filter((f) => !f.itemId || !D.items[f.itemId] || D.items[f.itemId].deleted); }
 function propById(id) { return D.lists.properties.find((p) => p.id === id) || null; }
 /* People things can belong to (editable in Settings). */
@@ -378,7 +397,7 @@ async function sync(manual) {
     }
     S.lastSync = Date.now(); syncing = false; setSyncMsg('ok');
     if (manual) toast('Synced');
-    render();
+    refreshView();
   } catch (e) {
     syncing = false;
     const why = /failed to fetch|networkerror|load failed/i.test(e.message || '') ? "couldn't reach Dropbox" : (e.message || 'unknown error');
@@ -820,14 +839,14 @@ function viewItem(id) {
     h += itemLogTab(it);
   } else {
     const fs = itemFiles(id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-    h += fs.length ? '<div class="inbox-grid">' + fs.map(fileTile).join('') + '</div>' : '<div class="card empty">No files yet.</div>';
+    h += fs.length ? '<div class="inbox-grid">' + fs.map((f) => fileTile(f, id)).join('') + '</div>' : '<div class="card empty">No files yet.</div>';
     h += '<button class="btn primary" data-act="addfile" data-id="' + id + '">Add receipt or file</button>';
   }
   return h + '</main>' + nav('items');
 }
-function fileTile(f) {
+function fileTile(f, ctx) {
   const pic = '<span class="tilepic"><img data-thumb="' + f.id + '" alt="">' + (isPdfFile(f) ? '<span class="pdftag">PDF</span>' : '') + '</span>';
-  return '<button data-act="filesheet" data-id="' + f.id + '">' + pic + '<div class="cap">' + esc(f.kind) + '</div><div class="cap">' + esc(fmtDate(f.date) || 'No date') + (f.store ? ' · ' + esc(f.store) : '') + '</div></button>';
+  return '<button data-act="filesheet" data-id="' + f.id + '"' + (ctx ? ' data-item="' + ctx + '"' : '') + '>' + pic + '<div class="cap">' + esc(f.kind) + (isShared(f) ? ' · ' + fileItemIds(f).length + ' items' : '') + '</div><div class="cap">' + esc(fmtDate(f.date) || 'No date') + (f.store ? ' · ' + esc(f.store) : '') + '</div></button>';
 }
 
 function viewItemEdit(id) {
@@ -988,9 +1007,11 @@ function viewSettings() {
 function openSheet(html) { const s = $('#sheet'); s.innerHTML = '<div class="sheet" role="dialog" aria-modal="true">' + html + '</div>'; s.hidden = false; hydrateThumbs(); }
 function closeSheet() { const s = $('#sheet'); s.hidden = true; s.innerHTML = ''; }
 function sheetHead(t) { return '<div class="sheet-head"><h2>' + esc(t) + '</h2><button class="iconbtn" data-act="closesheet" aria-label="Close">✕</button></div>'; }
-function fileSheet(id) {
+function fileSheet(id, ctx) {
   const f = D.files[id]; if (!f) return;
-  const it = f.itemId && D.items[f.itemId] && !D.items[f.itemId].deleted ? D.items[f.itemId] : null;
+  const on = fileItemIds(f);
+  ctx = ctx && on.includes(ctx) ? ctx : on[0] || null;
+  const it = ctx ? D.items[ctx] : null;
   let h = sheetHead(f.kind || 'File');
   h += '<img class="preview" data-thumb="' + f.id + '" alt="' + esc(f.kind) + '">';
   h += '<div class="btns"><button class="btn primary" data-act="viewfile" data-id="' + id + '">View</button>' +
@@ -1001,10 +1022,18 @@ function fileSheet(id) {
   const grp = groupFiles(f).length;
   if (!it && grp > 1) h += '<div class="muted">Shared together with ' + (grp - 1) + ' other file' + (grp > 2 ? 's' : '') + '. Filing this one files them all.</div>';
   h += '<form class="form" data-form="file" data-id="' + id + '">' + kindFields(f.kind, f) + '<button class="btn primary" type="submit">Save changes</button></form>';
-  h += '<div class="muted">' + (it ? 'Filed to ' + esc(it.name) : 'In the inbox') + (f.uploaded ? ' · in Dropbox' : ' · waiting to upload') + '</div>';
-  h += '<div class="btns"><button class="btn" data-act="picker" data-id="' + id + '">' + (it ? 'Move to another item' : 'File to item') + '</button>' +
-    (it ? '<button class="btn quiet" data-act="unfile" data-id="' + id + '">Back to inbox</button>' : '<button class="btn quiet" data-act="newfromfile" data-id="' + id + '">New item from this</button>') + '</div>';
-  h += '<button class="btn danger" data-act="delfile" data-id="' + id + '">Delete file</button>';
+  h += '<div class="muted">' + (on.length > 1 ? 'On ' + on.length + ' items: ' + esc(on.map((x) => D.items[x].name).join(', ')) : it ? 'Filed to ' + esc(it.name) : 'In the inbox') + (f.uploaded ? ' · in Dropbox' : ' · waiting to upload') + '</div>';
+  const isRec = kindGroup(f.kind) === 'receipt';
+  if (it) {
+    h += '<div class="btns"><button class="btn" data-act="picker" data-id="' + id + '" data-mode="also">Add to another item</button>' +
+      '<button class="btn quiet" data-act="picker" data-id="' + id + '" data-mode="move" data-from="' + ctx + '">Move to another item</button></div>';
+    if (isRec) h += '<button class="btn" data-act="splitgo" data-id="' + id + '">' + I.plus + 'Add more items from this receipt</button>';
+    h += '<button class="btn quiet" data-act="unfile" data-id="' + id + '" data-from="' + ctx + '">' + (on.length > 1 ? 'Remove from ' + esc(it.name) : 'Back to inbox') + '</button>';
+  } else {
+    h += '<div class="btns"><button class="btn" data-act="picker" data-id="' + id + '">File to item</button><button class="btn quiet" data-act="newfromfile" data-id="' + id + '">New item from this</button></div>';
+    if (isRec) h += '<button class="btn" data-act="splitgo" data-id="' + id + '">' + I.plus + 'Several items on this receipt</button>';
+  }
+  h += '<button class="btn danger" data-act="delfile" data-id="' + id + '">' + (on.length > 1 ? 'Delete file from all ' + on.length + ' items' : 'Delete file') + '</button>';
   openSheet(h);
 }
 /* The boxes a file needs depend on what it is: receipts get store, date and total; documents a date; photos nothing. */
@@ -1019,17 +1048,20 @@ function applyKindFields(sel) {
   const g = kindGroup(sel.value), form = sel.closest('form');
   form.querySelectorAll('[data-show]').forEach((el) => { el.hidden = !el.dataset.show.split(' ').includes(g); });
 }
-function pickerList(fileId, q) {
-  const s = (q || '').toLowerCase();
-  const rows = live('items').filter((i) => !i.archived && (!s || [i.name, i.brand, i.model, i.store].some((v) => v && v.toLowerCase().includes(s))))
+function pickerList(fileId, q, mode, from) {
+  const s = (q || '').toLowerCase(), f = D.files[fileId];
+  const rows = live('items').filter((i) => !i.archived && !(mode && f && fileOn(f, i.id)) && (!s || [i.name, i.brand, i.model, i.store].some((v) => v && v.toLowerCase().includes(s))))
     .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 60);
-  return rows.length ? rows.map((i) => '<button class="row" data-act="pick" data-file="' + fileId + '" data-id="' + i.id + '"><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
+  return rows.length ? rows.map((i) => '<button class="row" data-act="pick" data-file="' + fileId + '" data-id="' + i.id + '"' + (mode ? ' data-mode="' + mode + '"' : '') + (from ? ' data-from="' + from + '"' : '') + '><div class="grow"><div class="t">' + esc(i.name) + '</div><div class="s">' +
     esc(propName(i.propertyId) + (i.location ? ', ' + i.location : '')) + '</div></div></button>').join('') : '<div class="empty">No matching items.</div>';
 }
-function openPicker(fileId) {
-  openSheet(sheetHead('File to item') + '<label class="search">' + I.search + '<span class="sr">Search items</span><input id="pickq" type="search" placeholder="Search items" data-file="' + fileId + '"></label>' +
-    '<button class="btn primary" data-act="newfromfile" data-id="' + fileId + '">' + I.plus + 'New item from this file</button>' +
-    '<div class="card list" id="picklist">' + pickerList(fileId, '') + '</div>');
+function openPicker(fileId, mode, from) {
+  const f = D.files[fileId], rec = f && kindGroup(f.kind) === 'receipt';
+  openSheet(sheetHead(mode === 'also' ? 'Add to another item' : mode === 'move' ? 'Move to another item' : 'File to item') +
+    '<label class="search">' + I.search + '<span class="sr">Search items</span><input id="pickq" type="search" placeholder="Search items" data-file="' + fileId + '" data-mode="' + (mode || '') + '" data-from="' + (from || '') + '"></label>' +
+    (mode ? '' : '<button class="btn primary" data-act="newfromfile" data-id="' + fileId + '">' + I.plus + 'New item from this file</button>' +
+      (rec ? '<button class="btn" data-act="splitgo" data-id="' + fileId + '">' + I.plus + 'Several items on this receipt</button>' : '')) +
+    '<div class="card list" id="picklist">' + pickerList(fileId, '', mode, from) + '</div>');
 }
 function propSheet(id) {
   const p = id ? propById(id) : { name: '', type: 'Investment', address: '' };
@@ -1789,7 +1821,7 @@ async function collectTaxNotes() {
     if (n.removed) { if (it.taxClaim && (!n.expenseId || it.taxClaim.expenseId === n.expenseId)) { delete it.taxClaim; it.sentToTax = ''; touch(it); changed = true; } }
     else { it.taxClaim = { expenseId: n.expenseId, person: n.person || '', fy: n.fy || '', pct: n.pct, claim: n.claim, savedAt: n.at || Date.now() }; touch(it); changed = true; }
   }
-  if (changed) { await saveData(); render(); }
+  if (changed) { await saveData(); refreshView(); }
 }
 function ourTaxHTML(it) {
   if (!it.work && !it.taxClaim) return '';
@@ -2175,7 +2207,93 @@ async function buildFaultReport(c) {
   W.footer('Fault report: ' + it.name);
   return W.doc.save();
 }
+/* ---------- v1.10: several items on one receipt ----------
+   One invoice, several things: add them all in one go. The receipt is stored once and shows on every item;
+   each item keeps its own warranty, photos and claims. */
+let SPLIT_N = 0;
+function splitRowHTML(k, first) {
+  const owner = S.owner === 'Lyndsey' ? 'Lyndsey' : 'Shared';
+  return '<div class="card pad splitrow" data-row="' + k + '">' +
+    '<div class="splithead"><b>Item</b>' + (first ? '' : '<button type="button" class="iconbtn" data-act="splitdel" aria-label="Remove this item">×</button>') + '</div>' +
+    '<label class="field req"><span>Item name</span><input name="name_' + k + '" placeholder="e.g. Dishwasher"></label>' +
+    '<div class="grid2"><label class="field"><span>Price (AUD)</span><input name="price_' + k + '" type="number" inputmode="decimal" step="0.01" min="0"></label>' +
+    '<label class="field"><span>Belongs to</span><select name="owner_' + k + '">' + peopleList().map((o) => opt(o, owner)).join('') + '</select></label></div>' +
+    '<label class="field"><span>Category</span><select name="cat_' + k + '">' + opt('', '', 'Choose…') + D.lists.categories.map((c) => opt(c, '')).join('') + '</select></label>' +
+    '<label class="check"><input type="checkbox" name="work_' + k + '"> Work deduction (for Our Tax)</label></div>';
+}
+function splitFiles(f) { return f.itemId ? [f] : groupFiles(f); }
+function viewSplit(fileId) {
+  const f = D.files[fileId];
+  if (!f || f.deleted) return header('Not found', { back: '#/inbox' }) + '<main><div class="card empty">This receipt was deleted.</div></main>' + nav('inbox');
+  const on = fileItemIds(f), first = on.length ? D.items[on[0]] : null;
+  SPLIT_N = on.length ? 1 : 2;
+  const back = first ? '#/item/' + first.id : '#/inbox';
+  let h = header('Items on this receipt', { back, sub: [f.store, f.date ? fmtDate(f.date) : '', f.total !== undefined && f.total !== '' ? fmtMoney(f.total) : ''].filter(Boolean).join(' · ') });
+  h += '<main><form class="form" data-form="split" data-id="' + f.id + '">';
+  h += '<img class="preview" data-thumb="' + f.id + '" alt="Receipt">';
+  if (on.length) h += '<div class="card pad"><div class="muted">Already on this receipt</div>' + on.map((id) => '<div>' + esc(D.items[id].name) + (D.items[id].price !== '' && D.items[id].price != null ? ' · ' + fmtMoney(D.items[id].price) : '') + '</div>').join('') + '</div>';
+  h += '<div class="muted">The same store, date and property go on every item. The receipt is saved once and shows on each one.</div>';
+  const stores = Array.from(new Set(live('items').map((i) => i.store).concat(live('files').map((x) => x.store)).filter(Boolean))).sort();
+  h += '<div class="grid2"><label class="field"><span>Store</span><input name="store" list="stores" value="' + esc(f.store || (first && first.store) || '') + '"></label>' +
+    '<label class="field"><span>Purchase date</span><input name="purchaseDate" type="date" value="' + esc(f.date || (first && first.purchaseDate) || '') + '"></label></div>' +
+    '<datalist id="stores">' + stores.map((s) => '<option value="' + esc(s) + '">').join('') + '</datalist>';
+  h += '<div class="grid2"><label class="field"><span>Property</span><select name="propertyId">' + D.lists.properties.map((p) => opt(p.id, first ? first.propertyId : (D.lists.properties[0] || {}).id, p.name)).join('') + '</select></label>' +
+    '<label class="field"><span>Location</span><input name="location" list="locs" value="' + esc((first && first.location) || '') + '" placeholder="Kitchen"></label></div>' +
+    '<datalist id="locs">' + D.lists.locations.map((l) => '<option value="' + esc(l) + '">').join('') + '</datalist>';
+  h += '<div id="splitrows">' + Array.from({ length: SPLIT_N }, (_, k) => splitRowHTML(k, k === 0)).join('') + '</div>';
+  h += '<button type="button" class="btn" data-act="splitrow">' + I.plus + 'Add another item</button>';
+  h += '<div class="card pad" id="splitsum" aria-live="polite">' + splitSumHTML(f, 0, 0) + '</div>';
+  h += '<button class="btn primary big" type="submit" id="splitgo">Add items</button></form></main>';
+  return h + nav('inbox');
+}
+function splitSumHTML(f, sum, n) {
+  const on = fileItemIds(f), already = on.reduce((a, id) => a + (+D.items[id].price || 0), 0), total = f.total === undefined || f.total === '' ? null : +f.total;
+  const got = Math.round((sum + already) * 100) / 100;
+  let h = '<div class="t" style="font-weight:700">Items add up to ' + fmtMoney(got) + (total != null ? ' of ' + fmtMoney(total) : '') + '</div>';
+  if (total != null) {
+    const left = Math.round((total - got) * 100) / 100;
+    h += '<div class="muted">' + (left === 0 ? 'Matches the receipt total.' : left > 0 ? fmtMoney(left) + ' not on an item yet. That’s fine for delivery, installation or things you don’t need to track.' : 'That’s ' + fmtMoney(-left) + ' more than the receipt total. Check the prices.') + '</div>';
+  }
+  return h;
+}
+function splitRows(form) { return Array.from(form.querySelectorAll('[data-row]')).map((r) => r.dataset.row); }
+function splitUpdate() {
+  const form = document.querySelector('form[data-form="split"]'); if (!form) return;
+  const f = D.files[form.dataset.id], fd = new FormData(form);
+  let sum = 0, n = 0;
+  splitRows(form).forEach((k) => { const p = +(fd.get('price_' + k) || 0); if (p) sum += p; if ((fd.get('name_' + k) || '').toString().trim()) n++; });
+  $('#splitsum').innerHTML = splitSumHTML(f, sum, n);
+  $('#splitgo').textContent = n > 1 ? 'Add ' + n + ' items' : n === 1 ? 'Add 1 item' : 'Add items';
+}
+async function saveSplit(form) {
+  const fd = new FormData(form), v = (k) => (fd.get(k) || '').toString().trim(), f = D.files[form.dataset.id];
+  const rows = splitRows(form).map((k) => ({ name: v('name_' + k), price: v('price_' + k), owner: v('owner_' + k), category: v('cat_' + k), work: fd.get('work_' + k) === 'on' }))
+    .filter((r) => r.name || r.price || r.category || r.work);
+  if (!rows.length) { toast('Add at least one item'); return; }
+  if (rows.some((r) => !r.name)) { toast('Give each item a name'); return; }
+  const shared = { store: v('store'), purchaseDate: v('purchaseDate'), propertyId: v('propertyId'), location: v('location') };
+  const files = splitFiles(f), made = [];
+  for (const r of rows) {
+    const it = touch(Object.assign({ id: uid(), createdAt: Date.now(), status: 'Active', brand: '', model: '', serial: '', spot: '', installDate: '', notes: '', replacementValue: '' }, shared,
+      { name: r.name, price: r.price === '' ? '' : +r.price, owner: r.owner, category: r.category, work: r.work }));
+    D.items[it.id] = it; made.push(it);
+    files.forEach((x) => attachFile(x, it.id));
+  }
+  await saveData();
+  go('#/items');
+  setTimeout(() => openSheet(sheetHead(made.length === 1 ? '1 item added' : made.length + ' items added') +
+    '<div class="muted">Each one has the receipt. Add a warranty to each, or do it later.</div><div class="card list">' +
+    made.map((it) => '<div class="row" style="cursor:default"><div class="grow"><div class="t">' + esc(it.name) + '</div><div class="s">' + esc(it.price !== '' ? fmtMoney(it.price) : 'No price') + '</div></div>' +
+      '<a class="btn quiet" style="min-height:40px;padding:0 12px" href="#/warranty/' + it.id + '/new">Add warranty</a></div>').join('') + '</div>' +
+    '<button class="btn primary" data-act="closesheet">Done</button>'), 80);
+}
 /* ---------- routing ---------- */
+/* Background updates (a sync finishing, a note from Our Tax) redraw the screen only when no form is open,
+   so nothing you're typing is wiped. The new data shows as soon as you save or move on. */
+function refreshView() {
+  if (document.querySelector('#app form[data-form]')) { const el = document.getElementById('syncmsg'); if (el) el.textContent = syncLabel(); return; }
+  render();
+}
 function render() {
   const app = $('#app'); if (!app || !D) return;
   LOG_IDX = null;
@@ -2197,6 +2315,7 @@ function render() {
     case 'claimform': html = viewClaimForm(parts[1], parts[2]); break;
     case 'reports': html = viewReports(); break;
     case 'service': html = viewService(); break;
+    case 'split': html = viewSplit(parts[1]); break;
     default: html = viewHome();
   }
   app.innerHTML = html;
@@ -2221,6 +2340,14 @@ window.addEventListener('hashchange', () => {
 });
 
 /* ---------- actions ---------- */
+/* When an item is archived, a receipt it shares with an item still in use stays with that item (in Files, not Archive). */
+async function archiveFilesOf(it) {
+  for (const f of itemFiles(it.id)) {
+    const inUse = fileItemIds(f).filter((x) => x !== it.id && !D.items[x].archived);
+    if (inUse.length) { if (f.itemId === it.id) { f.alsoItems = [...fileItemIds(f).filter((x) => x !== inUse[0])]; f.itemId = inUse[0]; touch(f); } continue; }
+    if (f.uploaded) await dropThumb(f.id);
+  }
+}
 const ACT = {
   syncnow() { sync(true); },
   tab(el) { ITEM_TAB = el.dataset.v; render(); },
@@ -2230,7 +2357,7 @@ const ACT = {
   async archive(el) {
     const it = D.items[el.dataset.id];
     it.archived = true; it.archivedAt = Date.now(); touch(it);
-    for (const f of itemFiles(it.id)) if (f.uploaded) await dropThumb(f.id);
+    await archiveFilesOf(it);
     await saveData(); toast('Archived. Restore it any time.'); render();
   },
   async restore(el) {
@@ -2241,16 +2368,20 @@ const ACT = {
   async archiveall() {
     const byItem = groupBy(live('warranties'), 'itemId');
     const items = live('items').filter((i) => suggestArchive(i, byItem[i.id] || []));
-    for (const it of items) { it.archived = true; it.archivedAt = Date.now(); touch(it); for (const f of itemFiles(it.id)) if (f.uploaded) await dropThumb(f.id); }
+    for (const it of items) { it.archived = true; it.archivedAt = Date.now(); touch(it); await archiveFilesOf(it); }
     await saveData(); toast(items.length + ' archived'); go('#/home');
   },
   async delitem(el) {
     const it = D.items[el.dataset.id];
-    const nf = itemFiles(it.id).length;
-    if (!confirm('Delete "' + it.name + '"' + (nf ? ' and its ' + nf + ' file' + (nf > 1 ? 's' : '') : '') + '? This can\'t be undone.')) return;
+    const own = itemFiles(it.id).filter((f) => !isShared(f)), shared = itemFiles(it.id).length - own.length;
+    if (!confirm('Delete "' + it.name + '"' + (own.length ? ' and its ' + own.length + ' file' + (own.length > 1 ? 's' : '') : '') + '?' +
+      (shared ? ' ' + shared + ' shared receipt' + (shared > 1 ? 's stay' : ' stays') + ' with the other items.' : '') + ' This can\'t be undone.')) return;
     it.deleted = true; touch(it);
     itemWarranties(it.id).forEach((w) => { w.deleted = true; touch(w); });
-    for (const f of itemFiles(it.id)) { f.deleted = true; touch(f); await dropThumb(f.id); }
+    for (const f of itemFiles(it.id)) {
+      if (fileItemIds(f).some((x) => x !== it.id)) { detachFile(f, it.id); continue; }
+      f.deleted = true; touch(f); await dropThumb(f.id);
+    }
     ['claims', 'logs', 'services'].forEach((c) => live(c).filter((r) => r.itemId === it.id).forEach((r) => { r.deleted = true; touch(r); }));
     await saveData(); toast('Deleted'); go('#/items');
   },
@@ -2260,17 +2391,29 @@ const ACT = {
     await saveData(); ITEM_TAB = 'warranties'; go('#/item/' + w.itemId);
   },
   addfile(el) { addFileSheet(el.dataset.id); },
-  filesheet(el) { fileSheet(el.dataset.id); },
+  filesheet(el) { fileSheet(el.dataset.id, el.dataset.item); },
   closesheet() { closeSheet(); },
+  splitgo(el) { closeSheet(); go('#/split/' + el.dataset.id); },
+  splitrow() { $('#splitrows').insertAdjacentHTML('beforeend', splitRowHTML(SPLIT_N++, false)); const r = $('#splitrows').lastElementChild; r.querySelector('input').focus(); splitUpdate(); },
+  splitdel(el) { el.closest('[data-row]').remove(); splitUpdate(); },
   openfile(el) { openFile(D.files[el.dataset.id]); },
-  picker(el) { openPicker(el.dataset.id); },
+  picker(el) { openPicker(el.dataset.id, el.dataset.mode, el.dataset.from); },
   async pick(el) {
-    const f = D.files[el.dataset.file];
-    groupFiles(f).forEach((g) => { g.itemId = el.dataset.id; touch(g); });
-    f.itemId = el.dataset.id; touch(f);
+    const f = D.files[el.dataset.file], to = el.dataset.id, mode = el.dataset.mode;
+    if (mode === 'also') { attachFile(f, to); await saveData(); closeSheet(); render(); toast('Added to ' + D.items[to].name + '. Stored once, shown on both.'); return; }
+    if (mode === 'move' && el.dataset.from && isShared(f)) {
+      if (f.itemId === el.dataset.from) f.itemId = to; else f.alsoItems = (f.alsoItems || []).map((x) => (x === el.dataset.from ? to : x));
+      touch(f); await saveData(); closeSheet(); ITEM_TAB = 'files'; go('#/item/' + to); toast('Moved'); return;
+    }
+    groupFiles(f).forEach((g) => { g.itemId = to; delete g.alsoItems; touch(g); });
+    f.itemId = to; delete f.alsoItems; touch(f);
     await saveData(); closeSheet(); ITEM_TAB = 'files'; go('#/item/' + f.itemId); toast('Filed');
   },
-  async unfile(el) { const f = D.files[el.dataset.id]; f.itemId = null; touch(f); await saveData(); closeSheet(); render(); toast('Moved to inbox'); },
+  async unfile(el) {
+    const f = D.files[el.dataset.id], from = el.dataset.from;
+    if (from && isShared(f)) { const name = D.items[from].name; detachFile(f, from); await saveData(); closeSheet(); render(); toast('Removed from ' + name); return; }
+    f.itemId = null; delete f.alsoItems; touch(f); await saveData(); closeSheet(); render(); toast('Moved to inbox');
+  },
   newfromfile(el) {
     const f = D.files[el.dataset.id];
     const grp = f.itemId ? [f] : groupFiles(f);
@@ -2494,13 +2637,15 @@ document.addEventListener('change', async (e) => {
   if (t.id === 'enexIn') { const f = t.files && t.files[0]; if (f && !/\.enex$/i.test(f.name)) { toast('That isn\'t an .enex file'); return; } startEnex(f); return; }
   if (t.dataset && t.dataset.act === 'autoread') { ACT.autoread(t); return; }
   if (t.closest && t.closest('[data-form="warranty"]')) warrantyPreview();
+  if (t.closest && t.closest('[data-form="split"]')) splitUpdate();
 });
 document.addEventListener('input', (e) => {
   const t = e.target;
   if (t.id === 'q') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.q = t.value; $('#itemlist').innerHTML = itemsListHTML(); }
-  if (t.id === 'pickq') { $('#picklist').innerHTML = pickerList(t.dataset.file, t.value); }
+  if (t.id === 'pickq') { $('#picklist').innerHTML = pickerList(t.dataset.file, t.value, t.dataset.mode, t.dataset.from); }
   if (t.id === 'deg') { $('#degv').textContent = t.value + '°'; }
   if (t.closest && t.closest('[data-form="warranty"]')) warrantyPreview();
+  if (t.closest && t.closest('[data-form="split"]')) splitUpdate();
 });
 document.addEventListener('submit', async (e) => {
   const form = e.target.closest('form[data-form]');
@@ -2530,6 +2675,8 @@ document.addEventListener('submit', async (e) => {
     await saveData(); toast(id ? 'Saved' : 'Item added');
     ITEM_TAB = id ? 'details' : 'warranties';
     go('#/item/' + it.id);
+  } else if (kind === 'split') {
+    await saveSplit(form);
   } else if (kind === 'warranty') {
     const id = form.dataset.id, itemId = form.dataset.item;
     const w = id ? D.warranties[id] : { id: uid(), itemId, createdAt: Date.now() };
