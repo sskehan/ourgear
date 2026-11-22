@@ -1,12 +1,12 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.15';
+const APP_VERSION = '1.17';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
 const PROPERTY_TYPES = ['Main residence', 'Investment', 'Holiday home', 'Other'];
-const FILE_KINDS = ['Receipt', 'Tax invoice', 'Warranty card', 'Manual', 'Photo', 'Serial plate', 'Certificate', 'Claim pack', 'Other'];
+const FILE_KINDS = ['Receipt', 'Tax invoice', 'Warranty card', 'Manual', 'Photo', 'Serial plate', 'Certificate', 'Email', 'Claim pack', 'Other'];
 /* Kinds of file: receipts carry store/date/total; photos carry nothing; other documents just a date. */
 const RECEIPT_KINDS = ['Receipt', 'Tax invoice'];
 const PHOTO_KINDS = ['Photo', 'Serial plate'];
@@ -565,6 +565,24 @@ async function finishImage(work, crop, docMode) {
   const thumb = await canvasBlob(scaledCopy(out, 320), 0.7);
   return { full, thumb };
 }
+/* Several photos picked at once: each saved as a Photo, compressed, no crop (Edit picture can crop any of them later). */
+async function savePhotos(files, itemId, claimId, onEach, pdfKind) {
+  const ids = [];
+  for (const file of files) {
+    const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+    if (!isPdf && !/^image\//.test(file.type || '') && !/\.(jpe?g|png|heic|webp)$/i.test(file.name || '')) continue;
+    try {
+      const r = isPdf ? { full: file, thumb: await pdfThumbBlob(file).catch(() => null) } : await quickCompress(file);
+      const f = touch({ id: uid(), itemId: itemId || null, kind: isPdf ? (pdfKind || 'Other') : 'Photo', date: todayISO(), store: '', total: '', mime: isPdf ? 'application/pdf' : 'image/jpeg', origName: file.name || '',
+        size: r.full.size, uploaded: false, path: null, createdAt: Date.now(), claimId: claimId || null });
+      await idb.put('blobs', f.id, r.full); if (r.thumb) await idb.put('thumbs', f.id, r.thumb);
+      D.files[f.id] = f; ids.push(f.id);
+      if (onEach) onEach(ids.length);
+    } catch (e) { /* unreadable picture: skip it */ }
+  }
+  await saveData();
+  return ids;
+}
 /* A shared image goes straight to the inbox: colour, compressed, no crop. */
 async function quickCompress(file) {
   const src = await loadSource(file);
@@ -927,7 +945,7 @@ function viewSnap() {
       '<button class="typebtn" data-act="snaptype" data-v="' + k + '" aria-pressed="' + (SNAP_TYPE === k) + '">' + (k === 'receipt' ? I.doc : k === 'photo' ? I.cam : I.doc) + '<span>' + l + '</span></button>').join('') + '</div>' +
       '<p class="muted">' + esc(tip) + '</p>' +
       '<label class="btn primary big" for="camIn">' + I.cam + 'Take photo</label><input id="camIn" class="sr" type="file" accept="image/*" capture="environment">' +
-      '<label class="btn big" for="pickIn">' + (SNAP_TYPE === 'photo' ? 'Choose from gallery' : 'Choose photo or PDF') + '</label><input id="pickIn" class="sr" type="file" accept="' + (SNAP_TYPE === 'photo' ? 'image/*' : 'image/*,application/pdf') + '">' +
+      '<label class="btn big" for="pickIn">' + (SNAP_TYPE === 'photo' ? 'Choose from gallery (one or more)' : 'Choose photo or PDF') + '</label><input id="pickIn" class="sr" type="file"' + (SNAP_TYPE === 'photo' ? ' multiple' : '') + ' accept="' + (SNAP_TYPE === 'photo' ? 'image/*' : 'image/*,application/pdf') + '">' +
       '</div></main>';
     return h + nav('snap');
   }
@@ -1401,7 +1419,7 @@ function draftFileSheet(dId, fId) {
     (f.thumb ? '<img class="preview" data-thumb="' + f.id + '" alt="">' : '') +
     '<button class="btn" data-act="impview" data-d="' + dId + '" data-f="' + fId + '">View full size</button>' +
     (img ? '<button class="btn" data-act="impedit" data-d="' + dId + '" data-f="' + fId + '">Edit picture (crop, rotate, black and white)</button>' : '') +
-    '<div class="field"><span>What is it?</span><div class="chips">' + ['Receipt', 'Tax invoice', 'Photo', 'Serial plate', 'Warranty card', 'Manual', 'Other'].map((k) =>
+    '<div class="field"><span>What is it?</span><div class="chips">' + ['Receipt', 'Tax invoice', 'Photo', 'Serial plate', 'Warranty card', 'Manual', 'Email', 'Other'].map((k) =>
       '<button class="chip" data-act="impkind" data-d="' + dId + '" data-f="' + fId + '" data-v="' + k + '" aria-pressed="' + (draftKind(f) === k) + '">' + k + '</button>').join('') + '</div></div>' +
     '<button class="btn danger" data-act="impdelfile" data-d="' + dId + '" data-f="' + fId + '">Remove from this note</button>');
   hydrateThumbs();
@@ -1701,7 +1719,7 @@ function viewClaim(id) {
   h += '<button class="btn primary big" data-act="logsheet" data-id="" data-item="' + it.id + '" data-claim="' + id + '">' + I.plus + 'Add an update</button>';
   h += '<div class="btns"><button class="btn" data-act="faultreport" data-id="' + id + '">' + I.doc + 'Fault report</button><button class="btn" data-act="packsheet" data-id="' + id + '">' + I.doc + 'Claim pack</button></div>';
   h += '<div class="muted">Fault report: the history of the fault on one page or two. Claim pack: the same plus receipts, invoices and photos, ready to send.</div>';
-  h += '<button class="btn quiet" data-act="claimphoto" data-id="' + id + '">Add a photo of the fault</button>';
+  h += '<button class="btn quiet" data-act="claimphoto" data-id="' + id + '">Add photos of the fault</button>';
   h += '<section class="section"><h2>Claim details</h2><div class="card pad form"><label class="field"><span>Status</span><select id="claimStatus" data-id="' + id + '">' +
     CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label>';
   const kv = [['Opened', fmtDate(c.opened)], ['Ticket', c.ticket], ['Claim with', c.provider], ['Contact', c.contact],
@@ -1761,6 +1779,7 @@ function logSheet(id, itemId, claimId) {
   if (cl) h += '<label class="field"><span>Follow up by</span><input name="followUp" type="date" value="' + esc(cl.followUp || '') + '"></label><div class="muted">Leave blank if nothing is due. It shows on Home when it\'s close.</div>';
   if (fs.length) h += '<div class="field"><span>Attach files from this item</span></div><div class="pickfiles">' + fs.map((f) =>
     '<label><input type="checkbox" name="file" value="' + f.id + '"' + ((l.fileIds || []).includes(f.id) ? ' checked' : '') + '><img data-thumb="' + f.id + '" alt=""><span>' + esc(f.kind) + '</span></label>').join('') + '</div>';
+  h += '<label class="btn quiet" for="logPics">' + I.plus + 'Add photos or PDFs</label><input id="logPics" class="sr" type="file" accept="image/*,application/pdf" multiple>';
   h += '<button class="btn primary" type="submit">Save update</button>';
   if (id) h += '<button class="btn danger" type="button" data-act="dellog" data-id="' + id + '">Delete update</button>';
   openSheet(h + '</form>');
@@ -2951,6 +2970,30 @@ document.addEventListener('click', (e) => {
 document.addEventListener('change', async (e) => {
   const t = e.target;
   if (t.dataset && t.dataset.act === 'wifionly') { ACT.wifionly(t); return; }
+  if (t.id === 'pickIn' && t.files && t.files.length > 1) {
+    const files = Array.from(t.files), cl = CLAIM_TARGET, item = SNAP_TARGET;
+    toast('Adding ' + files.length + ' photos…');
+    const ids = await savePhotos(files, item, cl, (n) => toast('Adding photos… ' + n + ' of ' + files.length));
+    CLAIM_TARGET = null; SNAP_TARGET = null;
+    if (cl && D.claims[cl]) {
+      const l = touch({ id: uid(), itemId: D.claims[cl].itemId, claimId: cl, date: todayISO(), kind: 'Note', ticket: '', contact: '', text: ids.length + ' photos added', fileIds: ids, createdAt: Date.now() });
+      D.logs[l.id] = l; await saveData(); go('#/claim/' + cl);
+    } else if (item) { ITEM_TAB = 'files'; go('#/item/' + item); } else go('#/inbox');
+    toast(ids.length + ' photo' + (ids.length === 1 ? '' : 's') + ' added' + (ids.length < files.length ? ' (' + (files.length - ids.length) + ' couldn\'t be read)' : '') + '. Use Edit picture on any of them to crop.');
+    return;
+  }
+  if (t.id === 'logPics' && t.files && t.files.length) {
+    const form = t.closest('form[data-form="log"]'), files = Array.from(t.files);
+    const lab = form.querySelector('label[for="logPics"]'); if (lab) lab.textContent = 'Adding ' + files.length + ' file' + (files.length === 1 ? '' : 's') + '…';
+    const ids = await savePhotos(files, form.dataset.item, form.dataset.claim || null, null, form.elements.kind && form.elements.kind.value === 'Email' ? 'Email' : 'Other');
+    let box = form.querySelector('.pickfiles');
+    if (!box) { lab.insertAdjacentHTML('beforebegin', '<div class="field"><span>Attach files from this item</span></div><div class="pickfiles"></div>'); box = form.querySelector('.pickfiles'); }
+    box.insertAdjacentHTML('afterbegin', ids.map((id) => '<label><input type="checkbox" name="file" value="' + id + '" checked><img data-thumb="' + id + '" alt=""><span>' + esc(D.files[id].kind) + '</span></label>').join(''));
+    hydrateThumbs(); t.value = '';
+    if (lab) lab.innerHTML = I.plus + 'Add photos or PDFs';
+    toast(ids.length + ' file' + (ids.length === 1 ? '' : 's') + ' added and ticked');
+    return;
+  }
   if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) { const cl = CLAIM_TARGET; await startSnap(f, SNAP_TARGET, cl ? 'photo' : SNAP_TYPE); if (SNAP) SNAP.claimId = cl; } return; }
   if (t.id === 'fcat') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.cat = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'claimStatus') {
