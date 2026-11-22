@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.14';
+const APP_VERSION = '1.15';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -812,6 +812,8 @@ function viewItem(id) {
       ['Replacement value', fmtMoney(it.replacementValue)], ['Status', it.status || 'Active'], ['Work deduction', it.work ? 'Yes' : ''], ['Notes', it.notes]]
       .filter((r) => r[1]);
     h += '<div class="card kv">' + kv.map((r) => '<div>' + esc(r[0]) + '</div><div style="white-space:pre-line">' + esc(r[1]) + '</div>').join('') + '</div>';
+    const rc = itemFiles(id).filter((f) => kindGroup(f.kind) === 'receipt').sort((a, b) => (b.date || '').localeCompare(a.date || ''))[0];
+    if (rc && !it.archived) h += '<button class="btn" data-act="splitgo" data-id="' + rc.id + '">' + I.plus + 'Another item on this receipt</button>';
     h += ourTaxHTML(it);
     h += servicesHTML(it);
     h += '<div class="btns"><a class="btn primary" href="#/item/' + id + '/edit">Edit</a>' +
@@ -842,6 +844,8 @@ function viewItem(id) {
     const fs = itemFiles(id).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
     h += fs.length ? '<div class="inbox-grid">' + fs.map((f) => fileTile(f, id)).join('') + '</div>' : '<div class="card empty">No files yet.</div>';
     h += '<button class="btn primary" data-act="addfile" data-id="' + id + '">Add receipt or file</button>';
+    const rc = fs.find((f) => kindGroup(f.kind) === 'receipt');
+    if (rc && !it.archived) h += '<button class="btn" data-act="splitgo" data-id="' + rc.id + '">' + I.plus + 'Another item on this receipt</button>';
   }
   return h + '</main>' + nav('items');
 }
@@ -1355,7 +1359,7 @@ async function clearImport() {
 }
 /* Turn a reviewed draft into an item (or add it to an existing one). */
 function draftFileRecs(d, itemId) {
-  return d.files.map((x) => touch({ id: x.id, itemId, kind: /^image\//.test(x.mime) ? 'Receipt' : x.mime === 'application/pdf' ? 'Tax invoice' : 'Other',
+  return d.files.map((x) => touch({ id: x.id, itemId, kind: x.kind || (/^image\//.test(x.mime) ? 'Receipt' : x.mime === 'application/pdf' ? 'Tax invoice' : 'Other'),
     date: d.date || '', store: d.store || '', total: d.total === undefined ? '' : d.total, mime: x.mime, origName: x.origName, size: x.size,
     uploaded: false, path: null, createdAt: Date.now() }));
 }
@@ -1377,6 +1381,31 @@ function acceptDraft(d, vals, archived) {
   return it;
 }
 
+function draftKind(f) { return f.kind || (/^image\//.test(f.mime) ? 'Receipt' : f.mime === 'application/pdf' ? 'Tax invoice' : 'Other'); }
+/* What's been typed on the draft card survives editing, labelling or removing a picture. */
+let IMP_FORM = null;
+function saveDraftForm() {
+  const form = document.querySelector('form[data-form="draft"]');
+  IMP_FORM = form ? { id: form.dataset.id, vals: Object.fromEntries(new FormData(form).entries()) } : null;
+}
+function restoreDraftForm() {
+  const form = document.querySelector('form[data-form="draft"]');
+  if (!form || !IMP_FORM || IMP_FORM.id !== form.dataset.id) return;
+  for (const [k, v] of Object.entries(IMP_FORM.vals)) { const el = form.elements[k]; if (el && el.type !== 'submit') el.value = v; }
+  const st = form.elements.status; if (st) { const b = document.getElementById('impAccept'), n = document.getElementById('impStatusNote'); if (b) b.textContent = st.value === 'Active' ? 'Accept' : 'Archive'; if (n) n.hidden = st.value === 'Active'; }
+}
+function draftFileSheet(dId, fId) {
+  const d = IMP.drafts[dId], f = d && d.files.find((x) => x.id === fId); if (!f) return;
+  const n = d.files.indexOf(f) + 1, img = /^image\//.test(f.mime);
+  openSheet(sheetHead((img ? 'Picture ' : 'File ') + n + ' of ' + d.files.length) +
+    (f.thumb ? '<img class="preview" data-thumb="' + f.id + '" alt="">' : '') +
+    '<button class="btn" data-act="impview" data-d="' + dId + '" data-f="' + fId + '">View full size</button>' +
+    (img ? '<button class="btn" data-act="impedit" data-d="' + dId + '" data-f="' + fId + '">Edit picture (crop, rotate, black and white)</button>' : '') +
+    '<div class="field"><span>What is it?</span><div class="chips">' + ['Receipt', 'Tax invoice', 'Photo', 'Serial plate', 'Warranty card', 'Manual', 'Other'].map((k) =>
+      '<button class="chip" data-act="impkind" data-d="' + dId + '" data-f="' + fId + '" data-v="' + k + '" aria-pressed="' + (draftKind(f) === k) + '">' + k + '</button>').join('') + '</div></div>' +
+    '<button class="btn danger" data-act="impdelfile" data-d="' + dId + '" data-f="' + fId + '">Remove from this note</button>');
+  hydrateThumbs();
+}
 function viewImport() {
   let h = header('Import', { back: '#/settings', sub: IMP ? IMP.source + ' · ' + IMP.fileName : 'Evernote export file' });
   h += '<main>';
@@ -1411,9 +1440,11 @@ function viewImport() {
     h += '<form class="card pad form" data-form="draft" data-id="' + d.id + '">';
     h += '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center"><span class="muted">From "' + esc(d.title) + '"</span>' +
       (dupItem ? '<span class="badge b-soon">Possible duplicate</span>' : '') + '</div>';
-    if (d.files.length) h += '<div class="files">' + d.files.map((f, i) => '<button type="button" class="draftpic" data-act="impview" data-d="' + d.id + '" data-f="' + f.id + '" aria-label="View ' + (f.mime === 'application/pdf' ? 'PDF' : 'picture') + ' ' + (i + 1) + ' full size">' +
+    if (d.files.length) h += '<div class="files">' + d.files.map((f, i) => '<div class="draftfile"><button type="button" class="draftpic" data-act="impview" data-d="' + d.id + '" data-f="' + f.id + '" aria-label="View ' + (f.mime === 'application/pdf' ? 'PDF' : 'picture') + ' ' + (i + 1) + ' full size">' +
       (f.thumb ? '<img class="thumb" style="width:100%;height:auto;aspect-ratio:3/4" data-thumb="' + f.id + '" alt="">' : '<div class="thumb" style="width:100%;height:auto;aspect-ratio:3/4">' + esc(f.mime === 'application/pdf' ? 'PDF' : 'File') + '</div>') +
-      '<span class="cap">Tap to view</span></button>').join('') + '</div>';
+      '<span class="cap">' + esc(draftKind(f)) + '</span></button>' +
+      '<button type="button" class="btn quiet draftopt" data-act="impfile" data-d="' + d.id + '" data-f="' + f.id + '">Options</button></div>').join('') + '</div><div class="muted" style="font-size:13px">Tap a picture to see it full size. Options lets you crop, rotate, relabel or remove it.</div>';
+    else h += '<div class="muted">No pictures left on this note.</div>';
     if (dupItem) h += '<div class="warn">Looks like <a href="#/item/' + dupItem.id + '">' + esc(dupItem.name) + '</a>, already in Our Gear. Merge adds these files and notes to it.</div>';
     h += '<label class="field req"><span>Item name</span><input name="name" value="' + esc(d.title) + '" required></label>';
     h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(d.date || '') + '"></label>' +
@@ -1429,7 +1460,8 @@ function viewImport() {
     h += '<div class="muted" id="impStatusNote" hidden>It\'s kept on record with its receipts, and archived so it stays out of your lists and expiry alerts.</div>';
     if (d.files.some((f) => /^image\//.test(f.mime) || f.mime === 'application/pdf')) h += '<button class="btn quiet" type="button" data-act="impocr" data-id="' + d.id + '">Read receipt</button><div class="muted" id="impocrmsg" aria-live="polite"></div>';
     h += '<div class="btns three"><button class="btn quiet" type="submit" name="act" value="skip">Skip</button><button class="btn" type="submit" name="act" value="merge">Merge</button>' +
-      '<button class="btn primary" type="submit" name="act" value="accept" id="impAccept">Accept</button></div></form>';
+      '<button class="btn primary" type="submit" name="act" value="accept" id="impAccept">Accept</button></div>' +
+      '<button class="btn quiet" type="submit" name="act" value="acceptsplit">' + I.plus + 'Accept, then add more items on this receipt</button></form>';
   }
   if (IMP_PILE === 'old' && impPending('old').length) {
     const n = impPending('old').length;
@@ -2229,6 +2261,7 @@ async function buildFaultReport(c) {
    One invoice, several things: add them all in one go. The receipt is stored once and shows on every item;
    each item keeps its own warranty, photos and claims. */
 let SPLIT_N = 0;
+let SPLIT_BACK = null; // where to go after saving (the Evernote review, when coming from there)
 function splitRowHTML(k, first) {
   const owner = S.owner === 'Lyndsey' ? 'Lyndsey' : 'Shared';
   return '<div class="card pad splitrow" data-row="' + k + '">' +
@@ -2245,7 +2278,7 @@ function viewSplit(fileId) {
   if (!f || f.deleted) return header('Not found', { back: '#/inbox' }) + '<main><div class="card empty">This receipt was deleted.</div></main>' + nav('inbox');
   const on = fileItemIds(f), first = on.length ? D.items[on[0]] : null;
   SPLIT_N = on.length ? 1 : 2;
-  const back = first ? '#/item/' + first.id : '#/inbox';
+  const back = SPLIT_BACK || (first ? '#/item/' + first.id : '#/inbox');
   let h = header('Items on this receipt', { back, sub: [f.store, f.date ? fmtDate(f.date) : '', f.total !== undefined && f.total !== '' ? fmtMoney(f.total) : ''].filter(Boolean).join(' · ') });
   h += '<main><form class="form" data-form="split" data-id="' + f.id + '">';
   h += '<img class="preview" data-thumb="' + f.id + '" alt="Receipt">';
@@ -2298,7 +2331,8 @@ async function saveSplit(form) {
     files.forEach((x) => attachFile(x, it.id));
   }
   await saveData();
-  go('#/items');
+  const dest = SPLIT_BACK || '#/items'; SPLIT_BACK = null;
+  go(dest);
   setTimeout(() => openSheet(sheetHead(made.length === 1 ? '1 item added' : made.length + ' items added') +
     '<div class="muted">Each one has the receipt. Add a warranty to each, or do it later.</div><div class="card list">' +
     made.map((it) => '<div class="row" style="cursor:default"><div class="grow"><div class="t">' + esc(it.name) + '</div><div class="s">' + esc(it.price !== '' ? fmtMoney(it.price) : 'No price') + '</div></div>' +
@@ -2529,6 +2563,7 @@ function render() {
     default: html = viewHome();
   }
   app.innerHTML = html;
+  if (parts[0] === 'import') restoreDraftForm();
   if ($('#lockbioBtn')) bioAvailable().then((ok) => { const b = $('#lockbioBtn'); if (b) b.hidden = !ok; });
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'crop') { drawCropView(); bindCropDrag(); }
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'details' && SNAP.result) { const im = $('#snapprev'); if (im) im.src = URL.createObjectURL(SNAP.result.full); }
@@ -2630,7 +2665,7 @@ const ACT = {
   addfile(el) { addFileSheet(el.dataset.id); },
   filesheet(el) { fileSheet(el.dataset.id, el.dataset.item); },
   closesheet() { closeSheet(); },
-  async splitgo(el) { await keepFileForm(); closeSheet(); go('#/split/' + el.dataset.id); },
+  async splitgo(el) { SPLIT_BACK = null; await keepFileForm(); closeSheet(); go('#/split/' + el.dataset.id); },
   splitrow() { $('#splitrows').insertAdjacentHTML('beforeend', splitRowHTML(SPLIT_N++, false)); const r = $('#splitrows').lastElementChild; r.querySelector('input').focus(); splitUpdate(); },
   splitdel(el) { el.closest('[data-row]').remove(); splitUpdate(); },
   openfile(el) { openFile(D.files[el.dataset.id]); },
@@ -2665,7 +2700,7 @@ const ACT = {
     const f = D.files[el.dataset.id]; f.deleted = true; touch(f); await dropThumb(f.id);
     await saveData(); closeSheet(); render(); toast('File deleted');
   },
-  snapcancel() { const t = SNAP_TARGET, back = SNAP && SNAP.editFileId ? SNAP.back : null; SNAP = null; SNAP_TARGET = null; go(back || (t ? '#/item/' + t : '#/home')); },
+  snapcancel() { const t = SNAP_TARGET, back = SNAP && (SNAP.editFileId || SNAP.draft) ? SNAP.back : null; SNAP = null; SNAP_TARGET = null; go(back || (t ? '#/item/' + t : '#/home')); },
   rot() { SNAP.quarter = (SNAP.quarter + 1) % 4; rebuildWork(); drawCropView(); },
   cropall() { SNAP.crop = { x: 0, y: 0, w: SNAP.work.width, h: SNAP.work.height }; placeCropRect(); },
   docmode(el) { SNAP.docMode = !SNAP.docMode; el.setAttribute('aria-pressed', SNAP.docMode); el.textContent = SNAP.docMode ? 'Black and white' : 'Colour'; },
@@ -2686,6 +2721,12 @@ const ACT = {
   },
   async editsave(el) {
     el.disabled = true; el.textContent = 'Saving…';
+    if (SNAP.draft) {
+      const d = IMP && IMP.drafts[SNAP.draft.d], df = d && d.files.find((x) => x.id === SNAP.draft.f);
+      const r = await finishImage(SNAP.work, SNAP.crop, SNAP.docMode);
+      if (df) { await idb.put('blobs', df.id, r.full); await dropThumb(df.id); await idb.put('thumbs', df.id, r.thumb); df.thumb = true; df.mime = 'image/jpeg'; df.size = r.full.size; await saveImport(); }
+      SNAP = null; go('#/import'); toast('Picture updated'); return;
+    }
     const f = D.files[SNAP.editFileId], back = SNAP.back || (f.itemId ? '#/item/' + f.itemId : '#/inbox');
     const r = await finishImage(SNAP.work, SNAP.crop, SNAP.docMode);
     await idb.put('blobs', f.id, r.full);
@@ -2755,6 +2796,29 @@ const ACT = {
       if (msg) msg.textContent = out; else toast(out);
     } catch (e) { if (msg) msg.textContent = 'Couldn\'t read it: ' + e.message.slice(0, 80); }
     el.disabled = false; el.textContent = 'Read receipt';
+  },
+  impfile(el) { saveDraftForm(); draftFileSheet(el.dataset.d, el.dataset.f); },
+  async impkind(el) {
+    const d = IMP.drafts[el.dataset.d], f = d && d.files.find((x) => x.id === el.dataset.f); if (!f) return;
+    f.kind = el.dataset.v; await saveImport(); closeSheet(); render(); toast('Marked as ' + f.kind.toLowerCase());
+  },
+  async impdelfile(el) {
+    const d = IMP.drafts[el.dataset.d], f = d && d.files.find((x) => x.id === el.dataset.f); if (!f) return;
+    if (!confirm('Remove this ' + (/^image\//.test(f.mime) ? 'picture' : 'file') + ' from the note? It won\'t be imported.')) return;
+    d.files = d.files.filter((x) => x !== f);
+    await idb.del('blobs', f.id); await dropThumb(f.id);
+    await saveImport(); closeSheet(); render(); toast('Removed');
+  },
+  async impedit(el) {
+    const d = IMP.drafts[el.dataset.d], f = d && d.files.find((x) => x.id === el.dataset.f); if (!f) return;
+    el.disabled = true; el.textContent = 'Opening picture…';
+    try {
+      const src = await loadSource(await idb.get('blobs', f.id));
+      closeSheet();
+      SNAP = { step: 'crop', file: { name: f.origName || 'picture.jpg', type: 'image/jpeg' }, isPdf: false, quarter: 0, deg: 0, docMode: false, fullCrop: true,
+        itemId: null, kind: draftKind(f), src, editFileId: f.id, draft: { d: d.id, f: f.id }, back: '#/import' };
+      rebuildWork(); location.hash = '#/snap';
+    } catch (e) { toast('Could not open the picture: ' + e.message.slice(0, 80)); el.disabled = false; el.textContent = 'Edit picture (crop, rotate, black and white)'; }
   },
   impview(el) {
     const d = IMP.drafts[el.dataset.d], f = d && d.files.find((x) => x.id === el.dataset.f); if (!f) return;
@@ -2970,6 +3034,7 @@ document.addEventListener('submit', async (e) => {
     applyFileForm(form); await saveData(); closeSheet(); render(); toast('Saved');
   } else if (kind === 'draft') {
     const d = IMP.drafts[form.dataset.id], act = e.submitter ? e.submitter.value : 'accept';
+    if (act !== 'merge') IMP_FORM = null;
     if (act === 'skip') {
       d.status = 'skipped';
       for (const f of d.files) { await idb.del('blobs', f.id); await dropThumb(f.id); }
@@ -2981,8 +3046,13 @@ document.addEventListener('submit', async (e) => {
       openMergePicker(d.id, vals); return;
     }
     if (!vals.name) { toast('Give the item a name'); return; }
-    acceptDraft(d, vals, false);
-    await saveImport(); await saveData(); toast(vals.status !== 'Active' ? 'Archived (' + vals.status.toLowerCase() + ')' : 'Added'); render();
+    const made = acceptDraft(d, vals, false);
+    await saveImport(); await saveData();
+    if (act === 'acceptsplit') {
+      const fs = itemFiles(made.id), rec = fs.find((x) => kindGroup(x.kind) === 'receipt') || fs[0];
+      if (rec) { SPLIT_BACK = '#/import'; toast('Added. Now add the other items on this receipt.'); go('#/split/' + rec.id); return; }
+    }
+    toast(vals.status !== 'Active' ? 'Archived (' + vals.status.toLowerCase() + ')' : 'Added'); render();
   } else if (kind === 'claim') {
     const id = form.dataset.id, itemId = form.dataset.item;
     if (!v('title')) { toast('Say what\'s wrong'); return; }

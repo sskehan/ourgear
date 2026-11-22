@@ -32,6 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.15: Evernote review: Options on each picture to crop, rotate or black-and-white it, mark what it is (receipt, photo, serial plate…) or remove it; "Accept, then add more items on this receipt"; an item page now has "Another item on this receipt"
 - 1.14: Evernote review: tap a picture or PDF to view it full size (with zoom); "Still have it?" lets you archive an item as disposed of, sold or replaced; Read receipt now shows what it found and updates the store, date and price (works on scanned PDFs too)
 - 1.13: app lock (Settings → App lock): a PIN for each phone, with fingerprint or face unlock where the phone has it; locks when opened and again after the time you choose; the app shows nothing in the recent-apps view; Forgot PIN and "Remove everything from this phone" clear this phone only (Dropbox keeps everything). Security note: the Dropbox app key in the code is public by design and can't open anyone's Dropbox; turn on two-step verification on the Dropbox account
 - 1.12: choices and typing in a file's details (What is it?, date, store, total) are kept when you tap File to item, New item from this, Several items, Add to / Move to another item, Back to inbox or Edit picture. The ✕ still closes without saving
