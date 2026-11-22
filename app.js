@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.12';
+const APP_VERSION = '1.13';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -655,6 +655,7 @@ function badge(st) { return '<span class="badge b-' + st.kind + '">' + esc(st.la
 function opt(v, cur, label) { return '<option value="' + esc(v) + '"' + (String(v) === String(cur == null ? '' : cur) ? ' selected' : '') + '>' + esc(label == null ? v : label) + '</option>'; }
 const SV = (paths, size) => '<svg width="' + (size || 22) + '" height="' + (size || 22) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
 const I = {
+  finger: SV('<path d="M18.9 7a8 8 0 0 1 1.1 5v1a6 6 0 0 0 .8 3"/><path d="M8 11a4 4 0 0 1 8 0v1a10 10 0 0 0 2 6"/><path d="M12 11v2a14 14 0 0 0 2.5 8"/><path d="M8 15a18 18 0 0 0 1.8 6"/><path d="M4.9 19a22 22 0 0 1 -.9 -7v-1a8 8 0 0 1 12 -6.95"/>', 28),
   back: SV('<path d="M15 6l-6 6l6 6"/>', 24),
   home: SV('<path d="M5 12l-2 0l9 -9l9 9l-2 0"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7"/><path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/>'),
   list: SV('<path d="M12 3l8 4.5v9l-8 4.5l-8 -4.5v-9l8 -4.5"/><path d="M12 12l8 -4.5"/><path d="M12 12v9"/><path d="M12 12l-8 -4.5"/>'),
@@ -985,6 +986,7 @@ function viewSettings() {
     ['Shaun', 'Lyndsey'].map((o) => opt(o, S.owner)).join('') + '</select></label>' +
     '<div class="field"><span>Theme</span></div><div class="swatches">' + THEMES.map((t) =>
       '<button class="swatch" data-act="theme" data-v="' + t.id + '" aria-pressed="' + (S.theme === t.id) + '"><i style="background:' + t.a + ';border:6px solid ' + t.b + '"></i>' + esc(t.name) + '</button>').join('') + '</div></div></section>';
+  h += lockSettingsHTML();
   h += '<section class="section"><div class="section-head"><h2>Properties</h2><button class="btn quiet" style="min-height:36px" data-act="propsheet" data-id="">Add</button></div><div class="card list">' +
     props.map((p) => '<button class="row" data-act="propsheet" data-id="' + esc(p.id) + '"><div class="grow"><div class="t">' + esc(p.name) + '</div><div class="s">' + esc(p.type + (p.address ? ' · ' + p.address : '')) + '</div></div></button>').join('') + '</div></section>';
   h += '<section class="section"><h2>Lists</h2><div class="card pad form">' +
@@ -2289,6 +2291,197 @@ async function saveSplit(form) {
       '<a class="btn quiet" style="min-height:40px;padding:0 12px" href="#/warranty/' + it.id + '/new">Add warranty</a></div>').join('') + '</div>' +
     '<button class="btn primary" data-act="closesheet">Done</button>'), 80);
 }
+/* ---------- v1.13: app lock ----------
+   Each phone can set its own PIN, plus fingerprint or face unlock where the phone offers it. The app asks for it when it
+   opens and again after it's been away for the chosen time. While locked (and whenever the app is in the background) the
+   screen shows nothing of your records, so the recent-apps view stays blank too.
+   What this protects: someone picking up your unlocked phone. Your Dropbox account (with two-step verification) and the
+   phone's own screen lock protect the rest. */
+const LOCK_KEY = 'og_lock';
+const LOCK_AFTER = [[0, 'Straight away'], [1, 'After 1 minute away'], [5, 'After 5 minutes away'], [15, 'After 15 minutes away']];
+let LOCK_PICKING = 0; // the camera or a file picker is open: leaving the app for it doesn't lock
+let LOCK_RENDER = false;
+let LOCKED = false, LOCK_HIDDEN_AT = 0, LOCK_WAITERS = [], LOCK_PIN = '';
+function lockCfg() { try { return JSON.parse(localStorage.getItem(LOCK_KEY) || 'null'); } catch (e) { return null; } }
+function saveLockCfg(c) { if (c) localStorage.setItem(LOCK_KEY, JSON.stringify(c)); else localStorage.removeItem(LOCK_KEY); }
+function b64(u8) { return btoa(String.fromCharCode(...new Uint8Array(u8))); }
+function unb64(s) { return Uint8Array.from(atob(s), (c) => c.charCodeAt(0)); }
+async function pinHash(pin, saltB64) {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: unb64(saltB64), iterations: 150000, hash: 'SHA-256' }, key, 256);
+  return b64(bits);
+}
+async function setPin(pin) {
+  const c = lockCfg() || { after: 1 };
+  c.salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+  c.hash = await pinHash(pin, c.salt); c.tries = 0; c.waitUntil = 0;
+  saveLockCfg(c);
+}
+async function checkPin(pin) { const c = lockCfg(); return !!c && (await pinHash(pin, c.salt)) === c.hash; }
+async function bioAvailable() {
+  try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch (e) { return false; }
+}
+async function bioSetup() {
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: 'Our Gear' },
+    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'Our Gear ' + (S.owner || ''), displayName: 'Our Gear unlock (' + (S.owner || 'this phone') + ')' },
+    pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -257 }],
+    authenticatorSelection: { authenticatorAttachment: 'platform', userVerification: 'required', residentKey: 'discouraged' }, timeout: 60000 } });
+  const c = lockCfg(); c.bio = b64(cred.rawId); saveLockCfg(c);
+}
+async function bioUnlock() {
+  const c = lockCfg(); if (!c || !c.bio) return false;
+  try {
+    const a = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)),
+      allowCredentials: [{ type: 'public-key', id: unb64(c.bio) }], userVerification: 'required', timeout: 60000 } });
+    return !!(a && a.response && a.response.authenticatorData && (new Uint8Array(a.response.authenticatorData)[32] & 0x04));
+  } catch (e) { return false; }
+}
+/* ---- the lock screen ---- */
+function lockEl() { let el = document.getElementById('lock'); if (!el) { el = document.createElement('div'); el.id = 'lock'; el.className = 'lock'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); el.setAttribute('aria-label', 'Our Gear is locked'); document.body.appendChild(el); } return el; }
+function drawLock(msg) {
+  const c = lockCfg() || {}, wait = Math.max(0, Math.ceil(((c.waitUntil || 0) - Date.now()) / 1000));
+  const dots = Array.from({ length: Math.max(4, LOCK_PIN.length) }, (_, i) => '<i class="' + (i < LOCK_PIN.length ? 'on' : '') + '"></i>').join('');
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', c.bio ? 'bio' : '', '0', 'del'];
+  lockEl().innerHTML = '<div class="lock-inner">' + logoSVG(56) + '<h1>Our Gear is locked</h1>' +
+    '<div class="muted" id="lockmsg" aria-live="polite">' + esc(wait ? 'Too many tries. Wait ' + wait + ' seconds.' : msg || 'Enter your PIN') + '</div>' +
+    '<div class="lock-dots" aria-label="' + LOCK_PIN.length + ' digits entered">' + dots + '</div>' +
+    '<div class="lock-keys">' + keys.map((k) => !k ? '<span></span>' :
+      k === 'del' ? '<button data-lk="del" aria-label="Delete">⌫</button>' :
+      k === 'bio' ? '<button data-lk="bio" aria-label="Unlock with fingerprint or face">' + I.finger + '</button>' :
+      '<button data-lk="' + k + '"' + (wait ? ' disabled' : '') + '>' + k + '</button>').join('') + '</div>' +
+    (LOCK_PIN.length >= 4 ? '<button class="btn primary lock-ok" data-lk="ok"' + (wait ? ' disabled' : '') + '>Unlock</button>' : '<div class="lock-ok"></div>') +
+    '<button class="btn quiet" data-lk="forgot">Forgot PIN?</button></div>';
+  if (wait) setTimeout(() => { if (LOCKED) drawLock(); }, 1000);
+}
+function lockNow() {
+  if (!lockCfg() || LOCKED) return;
+  LOCKED = true; LOCK_PIN = '';
+  document.body.classList.add('locked');
+  drawLock(); lockEl().hidden = false;
+  const c = lockCfg(); if (c.bio && document.visibilityState === 'visible') setTimeout(() => tryBio(), 300);
+}
+function unlockNow() {
+  LOCKED = false; LOCK_PIN = '';
+  const c = lockCfg(); if (c) { c.tries = 0; c.waitUntil = 0; saveLockCfg(c); }
+  document.body.classList.remove('locked', 'veiled');
+  lockEl().hidden = true; lockEl().innerHTML = '';
+  const w = LOCK_WAITERS; LOCK_WAITERS = []; w.forEach((f) => f());
+  if (LOCK_RENDER && !w.length) { LOCK_RENDER = false; render(); }
+}
+async function tryBio() { if (!LOCKED) return; if (await bioUnlock()) unlockNow(); }
+async function lockKey(k) {
+  const c = lockCfg(); if (!c) return unlockNow();
+  if (k === 'bio') return tryBio();
+  if (k === 'forgot') return forgotPin();
+  if ((c.waitUntil || 0) > Date.now()) return;
+  if (k === 'del') LOCK_PIN = LOCK_PIN.slice(0, -1);
+  else if (/^\d$/.test(k) && LOCK_PIN.length < 8) LOCK_PIN += k;
+  if (k === 'ok' || (LOCK_PIN.length === (c.len || 0) && /^\d$/.test(k))) {
+    if (await checkPin(LOCK_PIN)) return unlockNow();
+    c.tries = (c.tries || 0) + 1;
+    if (c.tries >= 5) c.waitUntil = Date.now() + 30000 * Math.pow(2, Math.min(c.tries - 5, 5));
+    saveLockCfg(c); LOCK_PIN = '';
+    return drawLock(c.tries >= 5 ? '' : 'Wrong PIN. ' + (5 - c.tries) + ' tr' + (5 - c.tries === 1 ? 'y' : 'ies') + ' before a wait.');
+  }
+  drawLock();
+}
+async function forgotPin() {
+  if (!confirm('Forgot your PIN? The only way in is to remove Our Gear\'s records from this phone. Everything already synced stays safe in Dropbox: connect Dropbox again (with the account password) to get it back. Anything not yet synced on this phone is lost.')) return;
+  await wipePhone();
+}
+/* Remove everything Our Gear keeps on this phone: records, pictures, Dropbox sign-in, lock and settings. */
+async function wipePhone() {
+  try { localStorage.removeItem('og_refresh'); } catch (e) { /* ignore */ }
+  Object.keys(localStorage).filter((k) => k.startsWith('og_')).forEach((k) => localStorage.removeItem(k));
+  try { if (idb.db) idb.db.close(); } catch (e) { /* ignore */ }
+  await new Promise((res) => { const q = indexedDB.deleteDatabase('ourgear'); q.onsuccess = q.onerror = q.onblocked = () => res(); });
+  location.replace(location.pathname + '#/home'); location.reload();
+}
+/* Wait here until unlocked (used while the app starts). */
+function whenUnlocked() { return LOCKED ? new Promise((res) => LOCK_WAITERS.push(res)) : Promise.resolve(); }
+function initLock() {
+  document.addEventListener('click', (e) => { const b = e.target.closest('[data-lk]'); if (b && LOCKED) { e.preventDefault(); e.stopPropagation(); lockKey(b.dataset.lk); } }, true);
+  document.addEventListener('keydown', (e) => {
+    if (!LOCKED) return;
+    if (/^\d$/.test(e.key)) lockKey(e.key); else if (e.key === 'Backspace') lockKey('del'); else if (e.key === 'Enter') lockKey('ok');
+  });
+  document.addEventListener('click', (e) => {
+    const t = e.target.closest('input[type="file"], label[for]');
+    if (t && (t.type === 'file' || (t.htmlFor && (document.getElementById(t.htmlFor) || {}).type === 'file'))) LOCK_PICKING = Date.now();
+  }, true);
+  document.addEventListener('change', (e) => { if (e.target.type === 'file') LOCK_PICKING = 0; }, true);
+  document.addEventListener('visibilitychange', () => {
+    const c = lockCfg(); if (!c) return;
+    const picking = LOCK_PICKING && Date.now() - LOCK_PICKING < 10 * 60000;
+    if (picking) { if (document.visibilityState === 'visible') LOCK_PICKING = 0; return; }
+    if (document.visibilityState === 'hidden') {
+      LOCK_HIDDEN_AT = Date.now();
+      document.body.classList.add('veiled'); // blank in the recent-apps view
+      if (!c.after) lockNow();
+    } else {
+      if (!LOCKED && Date.now() - LOCK_HIDDEN_AT >= (c.after || 0) * 60000) lockNow();
+      if (!LOCKED) document.body.classList.remove('veiled');
+      else if (c.bio) setTimeout(() => tryBio(), 300);
+    }
+  });
+  if (lockCfg()) lockNow();
+}
+/* ---- Settings ---- */
+function lockSettingsHTML() {
+  const c = lockCfg();
+  let h = '<section class="section"><h2>App lock</h2><div class="card pad form">';
+  if (!c) {
+    h += '<div class="muted">Ask for a PIN (and fingerprint, if this phone has it) when Our Gear opens. Each phone has its own.</div>' +
+      '<button class="btn primary" data-act="lockset">Turn on app lock</button>';
+  } else {
+    h += '<div><span class="badge b-ok">On</span> <span class="muted">PIN' + (c.bio ? ' and fingerprint or face' : '') + '</span></div>' +
+      '<label class="field"><span>Lock again</span><select id="lockAfter">' + LOCK_AFTER.map(([v, l]) => opt(String(v), String(c.after), l)).join('') + '</select></label>' +
+      '<div class="btns"><button class="btn" data-act="lockset">Change PIN</button>' + (c.bio ? '<button class="btn quiet" data-act="lockbiooff">Stop fingerprint</button>' : '<button class="btn" data-act="lockbio" id="lockbioBtn" hidden>Use fingerprint</button>') + '</div>' +
+      '<button class="btn quiet" data-act="locknow">Lock now</button>' +
+      '<button class="btn quiet" data-act="lockoff">Turn off app lock</button>';
+  }
+  h += '</div></section>';
+  h += '<section class="section"><h2>Remove from this phone</h2><div class="card pad form"><div class="muted">For a lost, sold or handed-down phone. Deletes Our Gear\'s records, pictures and Dropbox sign-in from this phone only. Everything synced stays in Dropbox for the other phone.</div>' +
+    '<button class="btn danger" data-act="wipephone">Remove everything from this phone</button></div></section>';
+  return h;
+}
+function pinSheet(step, first) {
+  openSheet(sheetHead(step === 'confirm' ? 'Enter the PIN again' : lockCfg() ? 'New PIN' : 'Choose a PIN') +
+    '<form class="form" data-form="pin" data-step="' + step + '"' + (first ? ' data-first="' + esc(first) + '"' : '') + '>' +
+    '<div class="muted">' + (step === 'confirm' ? 'To make sure it\'s right.' : '4 to 8 digits. Don\'t use your phone\'s PIN or your bank card PIN.') + '</div>' +
+    '<label class="field req"><span>PIN</span><input name="pin" type="password" inputmode="numeric" pattern="[0-9]{4,8}" minlength="4" maxlength="8" autocomplete="off" required autofocus></label>' +
+    '<button class="btn primary" type="submit">' + (step === 'confirm' ? 'Save PIN' : 'Next') + '</button></form>');
+  setTimeout(() => { const i = $('#sheet input[name="pin"]'); if (i) i.focus(); }, 50);
+}
+async function pinSubmit(form) {
+  const pin = (new FormData(form).get('pin') || '').toString();
+  if (!/^\d{4,8}$/.test(pin)) { toast('Use 4 to 8 digits'); return; }
+  if (form.dataset.step !== 'confirm') { pinSheet('confirm', pin); return; }
+  if (pin !== form.dataset.first) { toast('The PINs didn\'t match. Try again.'); pinSheet('new'); return; }
+  const wasOn = !!lockCfg();
+  await setPin(pin);
+  const c = lockCfg(); c.len = pin.length; saveLockCfg(c);
+  closeSheet(); render();
+  if (!wasOn && await bioAvailable() && confirm('Also unlock with your fingerprint or face?')) {
+    try { await bioSetup(); toast('App lock is on, with fingerprint'); } catch (e) { toast('App lock is on (fingerprint wasn\'t set up)'); }
+    render(); return;
+  }
+  toast(wasOn ? 'PIN changed' : 'App lock is on');
+}
+/* Actions that need the current PIN first. */
+function askPin(title, then) {
+  openSheet(sheetHead(title) + '<form class="form" data-form="pinask"><label class="field req"><span>Current PIN</span><input name="pin" type="password" inputmode="numeric" autocomplete="off" required></label>' +
+    '<button class="btn primary" type="submit">Continue</button></form>');
+  PIN_THEN = then;
+  setTimeout(() => { const i = $('#sheet input[name="pin"]'); if (i) i.focus(); }, 50);
+}
+let PIN_THEN = null;
+async function pinAskSubmit(form) {
+  const pin = (new FormData(form).get('pin') || '').toString();
+  if (!(await checkPin(pin))) { toast('Wrong PIN'); return; }
+  const f = PIN_THEN; PIN_THEN = null; closeSheet(); if (f) await f();
+}
 /* ---------- routing ---------- */
 /* Background updates (a sync finishing, a note from Our Tax) redraw the screen only when no form is open,
    so nothing you're typing is wiped. The new data shows as soon as you save or move on. */
@@ -2298,6 +2491,7 @@ function refreshView() {
 }
 function render() {
   const app = $('#app'); if (!app || !D) return;
+  if (LOCKED) { LOCK_RENDER = true; return; } // nothing is drawn behind the lock screen
   LOG_IDX = null;
   const h = location.hash || '#/home';
   const parts = h.replace(/^#\//, '').split('/');
@@ -2321,6 +2515,7 @@ function render() {
     default: html = viewHome();
   }
   app.innerHTML = html;
+  if ($('#lockbioBtn')) bioAvailable().then((ok) => { const b = $('#lockbioBtn'); if (b) b.hidden = !ok; });
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'crop') { drawCropView(); bindCropDrag(); }
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'details' && SNAP.result) { const im = $('#snapprev'); if (im) im.src = URL.createObjectURL(SNAP.result.full); }
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'details' && SNAP.isPdf) snapPdfDetails();
@@ -2622,6 +2817,17 @@ const ACT = {
     D.lists.properties = D.lists.properties.filter((p) => p.id !== el.dataset.id); D.lists.updatedAt = Date.now();
     await saveData(); closeSheet(); render();
   },
+  lockset() { if (lockCfg()) askPin('Change PIN', () => pinSheet('new')); else pinSheet('new'); },
+  lockoff() { askPin('Turn off app lock', () => { saveLockCfg(null); render(); toast('App lock is off on this phone'); }); },
+  async lockbio() { try { await bioSetup(); toast('Fingerprint unlock is on'); } catch (e) { toast('Fingerprint wasn\'t set up'); } render(); },
+  lockbiooff() { askPin('Stop fingerprint unlock', () => { const c = lockCfg(); delete c.bio; saveLockCfg(c); render(); toast('Fingerprint unlock is off'); }); },
+  locknow() { lockNow(); },
+  async wipephone() {
+    if (!confirm('Remove all of Our Gear\'s records, pictures and the Dropbox sign-in from THIS phone? Synced records stay in Dropbox.')) return;
+    if (DBX.connected() && navigator.onLine) { toast('Syncing first…'); await sync(true); }
+    if (!confirm('Last check: remove everything from this phone now?')) return;
+    await wipePhone();
+  },
   async savelists() {
     const read = (k) => Array.from(new Set($('#list-' + k).value.split('\n').map((s) => s.trim()).filter(Boolean)));
     const c = read('categories'), l = read('locations'), w = read('warrantyTypes'), pp = read('people');
@@ -2667,6 +2873,7 @@ document.addEventListener('change', async (e) => {
   if (t.id === 'fst') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.st = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
   if (t.id === 'repProp') { REP.prop = t.value; render(); return; }
   if (t.id === 'repArch') { REP.arch = t.checked; render(); return; }
+  if (t.id === 'lockAfter') { const c = lockCfg(); if (c) { c.after = +t.value; saveLockCfg(c); toast('Saved'); } return; }
   if (t.id === 'ownerSel') { S.owner = t.value; saveSettings(); toast('Saved'); return; }
   if (t.id === 'deg') { SNAP.deg = +t.value; rebuildWork(); drawCropView(); return; }
   if (t.id === 'restoreIn') { restoreBackup(t.files && t.files[0]); return; }
@@ -2711,6 +2918,10 @@ document.addEventListener('submit', async (e) => {
     await saveData(); toast(id ? 'Saved' : 'Item added');
     ITEM_TAB = id ? 'details' : 'warranties';
     go('#/item/' + it.id);
+  } else if (kind === 'pin') {
+    await pinSubmit(form);
+  } else if (kind === 'pinask') {
+    await pinAskSubmit(form);
   } else if (kind === 'split') {
     await saveSplit(form);
   } else if (kind === 'warranty') {
@@ -2906,6 +3117,8 @@ async function boot() {
   D = (await idb.get('kv', 'data')) || emptyData();
   if (!D.lists) D.lists = JSON.parse(JSON.stringify(DEFAULT_LISTS));
   COLLECTIONS.forEach((c) => { if (!D[c]) D[c] = {}; });
+  initLock();
+  await whenUnlocked();
   const signedIn = await DBX.finishSignIn().catch((e) => { toast('Sign-in error: ' + e.message); return true; });
   if (location.search.includes('share=1')) history.replaceState(null, '', location.pathname + '#/inbox');
   await loadImport().catch(() => {});

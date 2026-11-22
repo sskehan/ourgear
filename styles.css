@@ -203,3 +203,20 @@ button.stat { text-align: left; cursor: pointer; font: inherit; color: var(--tex
 .splitrow { display: flex; flex-direction: column; gap: 10px; }
 .splithead { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
 .splithead .iconbtn { font-size: 24px; margin: -6px -8px -6px 0; }
+/* 1.13 app lock */
+body.locked #app, body.locked #sheet, body.locked #viewer, body.locked #toast,
+body.veiled #app, body.veiled #sheet, body.veiled #viewer { visibility: hidden; }
+.lock { position: fixed; inset: 0; z-index: 100; background: var(--bg); color: var(--text); display: flex; align-items: center; justify-content: center; overflow: auto; }
+.lock[hidden] { display: none; }
+.lock-inner { width: 100%; max-width: 340px; padding: 24px 20px; display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+.lock-inner h1 { font-size: 22px; margin: 4px 0 0; }
+.lock-inner svg { color: var(--accent); }
+.lock-dots { display: flex; gap: 14px; min-height: 18px; margin: 6px 0; }
+.lock-dots i { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--accent-text); }
+.lock-dots i.on { background: var(--accent-text); }
+.lock-keys { display: grid; grid-template-columns: repeat(3, 76px); gap: 14px 22px; justify-content: center; }
+.lock-keys button { width: 76px; height: 76px; border-radius: 50%; border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 28px; font-weight: 600; font-family: inherit; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.lock-keys button:active { background: var(--accent-soft); }
+.lock-keys button:disabled { opacity: .4; }
+.lock-keys button[data-lk="bio"], .lock-keys button[data-lk="del"] { border-color: transparent; background: transparent; color: var(--accent-text); }
+.lock-ok { width: 100%; min-height: 52px; }

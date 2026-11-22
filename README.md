@@ -32,6 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.13: app lock (Settings → App lock): a PIN for each phone, with fingerprint or face unlock where the phone has it; locks when opened and again after the time you choose; the app shows nothing in the recent-apps view; Forgot PIN and "Remove everything from this phone" clear this phone only (Dropbox keeps everything). Security note: the Dropbox app key in the code is public by design and can't open anyone's Dropbox; turn on two-step verification on the Dropbox account
 - 1.12: choices and typing in a file's details (What is it?, date, store, total) are kept when you tap File to item, New item from this, Several items, Add to / Move to another item, Back to inbox or Edit picture. The ✕ still closes without saving
 - 1.11: viewing a receipt or photo from its details no longer loses what you'd typed (date, store, total, kind); the details come back when you close the picture
 - 1.10: several items on one receipt (one screen, one row per item, running total against the receipt; the receipt is stored once and shows on every item); add a receipt to another item, remove it from one item, and archiving or deleting one item keeps the receipt for the others; forms are no longer cleared when a sync finishes while you're typing
