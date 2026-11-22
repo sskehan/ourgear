@@ -220,3 +220,7 @@ body.veiled #app, body.veiled #sheet, body.veiled #viewer { visibility: hidden; 
 .lock-keys button:disabled { opacity: .4; }
 .lock-keys button[data-lk="bio"], .lock-keys button[data-lk="del"] { border-color: transparent; background: transparent; color: var(--accent-text); }
 .lock-ok { width: 100%; min-height: 52px; }
+/* 1.14 import review */
+.draftpic { padding: 0; border: 0; background: none; cursor: zoom-in; position: relative; display: block; width: 100%; font: inherit; color: inherit; }
+.draftpic .cap { position: absolute; left: 6px; bottom: 6px; background: rgba(17,24,39,.75); color: #fff; font-size: 12px; padding: 2px 8px; border-radius: 10px; }
+.flash { background: var(--accent-soft) !important; transition: background .4s; }
