@@ -226,3 +226,5 @@ body.veiled #app, body.veiled #sheet, body.veiled #viewer { visibility: hidden; 
 .flash { background: var(--accent-soft) !important; transition: background .4s; }
 .draftfile { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .draftopt { min-height: 40px; font-size: 14px; padding: 0 8px; }
+/* 1.18 bigger warranty text boxes */
+.field textarea.grow { min-height: 64px; resize: none; overflow: hidden; line-height: 1.4; }

@@ -32,6 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.18: warranty Covers is a full-width box that grows to show everything typed, and shows in full on the Warranty tab; warranty type "Maker" renamed "Manufacturer" (existing warranties are renamed automatically)
 - 1.17: "Add photos or PDFs" inside a claim update (an email saved as a PDF goes straight in; on an Email update it's labelled Email); new file type Email
 - 1.16: add several photos at once: "Add photos of the fault" on a claim, item photos from the gallery, and "Add new photos" inside a claim update (picked photos are saved without cropping; use Edit picture on any of them)
 - 1.15: Evernote review: Options on each picture to crop, rotate or black-and-white it, mark what it is (receipt, photo, serial plate…) or remove it; "Accept, then add more items on this receipt"; an item page now has "Another item on this receipt"

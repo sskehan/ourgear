@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.17';
+const APP_VERSION = '1.18';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -29,7 +29,7 @@ const DEFAULT_LISTS = {
     'Computers and network', 'TV and audio', 'Phones and tablets', 'Tools', 'Garden and outdoor', 'Furniture', 'Hobbies', 'Other'],
   locations: ['Kitchen', 'Laundry', 'Living', 'Dining', 'Bedroom 1', 'Bedroom 2', 'Bedroom 3', 'Bedroom 4', 'Bathroom', 'Ensuite',
     'Garage', 'Shed', 'Under house', 'Yard', 'Roof', 'Server cupboard'],
-  warrantyTypes: ['Maker', 'Extended', 'Installer', 'Workmanship', 'Store'],
+  warrantyTypes: ['Manufacturer', 'Extended', 'Installer', 'Workmanship', 'Store'],
   people: OWNERS.slice(),
   properties: [{ id: 'home', name: 'Home', type: 'Main residence', address: '' }],
   updatedAt: 0
@@ -120,6 +120,18 @@ function attachFile(f, itemId) {
 function inboxFiles() { return live('files').filter((f) => !f.itemId || !D.items[f.itemId] || D.items[f.itemId].deleted); }
 function propById(id) { return D.lists.properties.find((p) => p.id === id) || null; }
 /* People things can belong to (editable in Settings). */
+/* 1.18: the "Maker" warranty type is now called "Manufacturer". Renames it in the list and on saved warranties
+   (also when data arrives from a phone still on an older version). Returns true if anything changed. */
+function renameMaker(data) {
+  let changed = false;
+  const l = data.lists && data.lists.warrantyTypes;
+  if (l && l.includes('Maker')) {
+    data.lists.warrantyTypes = Array.from(new Set(l.map((t) => (t === 'Maker' ? 'Manufacturer' : t))));
+    data.lists.updatedAt = Date.now(); changed = true;
+  }
+  Object.values(data.warranties || {}).forEach((w) => { if (w.type === 'Maker') { w.type = 'Manufacturer'; touch(w); changed = true; } });
+  return changed;
+}
 function peopleList() { return D && D.lists && D.lists.people && D.lists.people.length ? D.lists.people : OWNERS; }
 function propName(id) { const p = propById(id); return p ? p.name : 'No property'; }
 
@@ -379,7 +391,7 @@ async function sync(manual) {
           rev = remote.meta.rev;
           const rd = await unpackData(remote.blob);
           remoteHash = textHash(stableStringify(rd));
-          if (mergeInto(D, rd)) await idb.put('kv', 'data', D);
+          if (mergeInto(D, rd) | renameMaker(D)) await idb.put('kv', 'data', D);
         }
       }
       await reconcileFiles();
@@ -846,7 +858,8 @@ function viewItem(id) {
       const from = w.startFrom === 'install' ? 'from install' : w.startFrom === 'custom' ? 'from ' + fmtDate(w.startDate) : 'from purchase';
       return '<a class="card pad" href="#/warranty/' + id + '/' + w.id + '" style="display:flex;flex-direction:column;gap:6px;text-decoration:none;color:var(--text)">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><span class="t" style="font-weight:700">' + esc((w.type || 'Warranty') + ' warranty') + '</span>' + badge(s) + '</div>' +
-        '<div class="muted">' + esc((w.covers || 'Whole item') + ' · ' + term + (w.termUnit === 'lifetime' ? '' : ' ' + from)) + '</div>' +
+        '<div style="white-space:pre-line;font-size:15px"><span class="muted">Covers: </span>' + esc(w.covers || 'Whole item') + '</div>' +
+        '<div class="muted">' + esc(term + (w.termUnit === 'lifetime' ? '' : ' ' + from)) + '</div>' +
         (s.expiry ? '<div style="font-size:14px">' + (s.kind === 'gone' ? 'Ended ' : 'Ends ') + esc(fmtDate(s.expiry)) + '</div>' : '') +
         (w.provider ? '<div class="muted">' + esc(w.provider + (w.contact ? ' · ' + w.contact : '')) + '</div>' : '') +
         (w.conditions ? '<div class="muted" style="white-space:pre-line">' + esc(w.conditions) + '</div>' : '') + '</a>';
@@ -906,12 +919,12 @@ function viewWarranty(itemId, wid) {
   const it = D.items[itemId];
   if (!it) return viewItems();
   const isNew = wid === 'new';
-  const w = isNew ? { type: 'Maker', startFrom: 'purchase', termUnit: 'years', termValue: '' } : D.warranties[wid];
+  const w = isNew ? { type: 'Manufacturer', startFrom: 'purchase', termUnit: 'years', termValue: '' } : D.warranties[wid];
   if (!w) return viewItem(itemId);
   let h = header(isNew ? 'Add warranty' : 'Edit warranty', { back: '#/item/' + itemId, sub: it.name });
   h += '<main><form class="form" data-form="warranty" data-item="' + itemId + '" data-id="' + esc(isNew ? '' : wid) + '">';
-  h += '<div class="grid2"><label class="field"><span>Type</span><select name="type">' + D.lists.warrantyTypes.map((t) => opt(t, w.type)).join('') + '</select></label>' +
-    '<label class="field"><span>Covers</span><input name="covers" value="' + esc(w.covers || '') + '" placeholder="Whole item"></label></div>';
+  h += '<label class="field"><span>Type</span><select name="type">' + D.lists.warrantyTypes.map((t) => opt(t, w.type)).join('') + '</select></label>';
+  h += '<label class="field"><span>Covers</span><textarea name="covers" class="grow" rows="2" placeholder="Whole item, or what\'s covered, e.g. compressor 10 years, parts and labour 2 years">' + esc(w.covers || '') + '</textarea></label>';
   h += '<div class="grid2"><label class="field"><span>Term</span><input name="termValue" type="number" inputmode="numeric" min="0" step="1" value="' + esc(w.termValue || '') + '"></label>' +
     '<label class="field"><span>Unit</span><select name="termUnit">' + opt('years', w.termUnit, 'Years') + opt('months', w.termUnit, 'Months') + opt('lifetime', w.termUnit, 'Lifetime') + '</select></label></div>';
   h += '<label class="field"><span>Starts from</span><select name="startFrom">' + opt('purchase', w.startFrom, 'Purchase date') + opt('install', w.startFrom, 'Install date') + opt('custom', w.startFrom, 'Another date') + '</select></label>';
@@ -919,7 +932,7 @@ function viewWarranty(itemId, wid) {
   h += '<label class="field"><span>Expiry date override (leave blank to work it out)</span><input name="expiryOverride" type="date" value="' + esc(w.expiryOverride || '') + '"></label>';
   h += '<div class="grid2"><label class="field"><span>Provider</span><input name="provider" value="' + esc(w.provider || '') + '"></label>' +
     '<label class="field"><span>Phone or website</span><input name="contact" value="' + esc(w.contact || '') + '"></label></div>';
-  h += '<label class="field"><span>Conditions</span><textarea name="conditions" placeholder="Original purchaser only, registration needed, parts only…">' + esc(w.conditions || '') + '</textarea></label>';
+  h += '<label class="field"><span>Conditions</span><textarea name="conditions" class="grow" placeholder="Original purchaser only, registration needed, parts only…">' + esc(w.conditions || '') + '</textarea></label>';
   h += '<div class="muted" id="wpreview"></div>';
   h += '<button class="btn primary big" type="submit">Save warranty</button>';
   if (!isNew) h += '<button class="btn danger" type="button" data-act="delwarranty" data-id="' + wid + '">Delete warranty</button>';
@@ -1391,7 +1404,7 @@ function acceptDraft(d, vals, archived) {
   draftFileRecs(Object.assign({}, d, { date: vals.date, store: vals.store, total: vals.total }), it.id).forEach((f) => { D.files[f.id] = f; });
   const term = vals.warranty || (d.lifetime ? 'lifetime' : '');
   if (term) {
-    const w = touch({ id: uid(), itemId: it.id, createdAt: Date.now(), type: 'Maker', covers: '', startFrom: 'purchase', startDate: '', expiryOverride: '',
+    const w = touch({ id: uid(), itemId: it.id, createdAt: Date.now(), type: 'Manufacturer', covers: '', startFrom: 'purchase', startDate: '', expiryOverride: '',
       provider: '', contact: '', conditions: '', termUnit: term === 'lifetime' ? 'lifetime' : 'years', termValue: term === 'lifetime' ? '' : term });
     D.warranties[w.id] = w;
   }
@@ -1752,7 +1765,7 @@ function viewClaimForm(itemId, cid) {
     h += '<div class="grid2"><label class="field"><span>Date reported</span><input name="opened" type="date" value="' + esc(c.opened || '') + '"></label>' +
       '<label class="field"><span>Status</span><select name="status">' + CLAIM_STATUS.map((s) => opt(s, c.status)).join('') + '</select></label></div>';
   }
-  h += '<div class="grid2"><label class="field"><span>Reported to</span><input name="provider" value="' + esc(c.provider || (best && best.provider) || it.store || '') + '" placeholder="Maker or store"></label>' +
+  h += '<div class="grid2"><label class="field"><span>Reported to</span><input name="provider" value="' + esc(c.provider || (best && best.provider) || it.store || '') + '" placeholder="Manufacturer or store"></label>' +
     '<label class="field"><span>Ticket or reference</span><input name="ticket" value="' + esc(c.ticket || '') + '"></label></div>';
   h += '<label class="field"><span>Their phone, email or contact person</span><input name="contact" value="' + esc(c.contact || (best && best.contact) || '') + '"></label>';
   h += wsel;
@@ -2549,6 +2562,8 @@ async function pinAskSubmit(form) {
   if (!(await checkPin(pin))) { toast('Wrong PIN'); return; }
   const f = PIN_THEN; PIN_THEN = null; closeSheet(); if (f) await f();
 }
+/* A text box that grows to show everything typed in it. */
+function growBox(t) { t.style.height = 'auto'; t.style.height = Math.max(t.scrollHeight + 2, 64) + 'px'; }
 /* ---------- routing ---------- */
 /* Background updates (a sync finishing, a note from Our Tax) redraw the screen only when no form is open,
    so nothing you're typing is wiped. The new data shows as soon as you save or move on. */
@@ -2582,6 +2597,7 @@ function render() {
     default: html = viewHome();
   }
   app.innerHTML = html;
+  app.querySelectorAll('textarea.grow').forEach(growBox);
   if (parts[0] === 'import') restoreDraftForm();
   if ($('#lockbioBtn')) bioAvailable().then((ok) => { const b = $('#lockbioBtn'); if (b) b.hidden = !ok; });
   if (parts[0] === 'snap' && SNAP && SNAP.step === 'crop') { drawCropView(); bindCropDrag(); }
@@ -3019,6 +3035,7 @@ document.addEventListener('change', async (e) => {
   if (t.closest && t.closest('[data-form="split"]')) splitUpdate();
 });
 document.addEventListener('input', (e) => {
+  if (e.target.classList && e.target.classList.contains('grow')) growBox(e.target);
   const t = e.target;
   if (t.id === 'q') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.q = t.value; $('#itemlist').innerHTML = itemsListHTML(); }
   if (t.id === 'pickq') { $('#picklist').innerHTML = pickerList(t.dataset.file, t.value, t.dataset.mode, t.dataset.from); }
@@ -3045,7 +3062,7 @@ document.addEventListener('submit', async (e) => {
     if (!id && NEW_ITEM_PREFILL) {
       (NEW_ITEM_PREFILL._fileIds || []).forEach((fid) => { const f = D.files[fid]; if (f) { f.itemId = it.id; touch(f); } });
       if (NEW_ITEM_PREFILL._lifetime) {
-        const w = touch({ id: uid(), itemId: it.id, createdAt: Date.now(), type: 'Maker', covers: '', termUnit: 'lifetime', termValue: '', startFrom: 'purchase',
+        const w = touch({ id: uid(), itemId: it.id, createdAt: Date.now(), type: 'Manufacturer', covers: '', termUnit: 'lifetime', termValue: '', startFrom: 'purchase',
           startDate: '', expiryOverride: '', provider: '', contact: '', conditions: '' });
         D.warranties[w.id] = w;
       }
@@ -3259,6 +3276,7 @@ async function boot() {
   D = (await idb.get('kv', 'data')) || emptyData();
   if (!D.lists) D.lists = JSON.parse(JSON.stringify(DEFAULT_LISTS));
   COLLECTIONS.forEach((c) => { if (!D[c]) D[c] = {}; });
+  if (renameMaker(D)) await idb.put('kv', 'data', D);
   initLock();
   await whenUnlocked();
   const signedIn = await DBX.finishSignIn().catch((e) => { toast('Sign-in error: ' + e.message); return true; });
