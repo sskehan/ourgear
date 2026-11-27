@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.19';
+const APP_VERSION = '1.20';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -685,6 +685,7 @@ function badge(st) { return '<span class="badge b-' + st.kind + '">' + esc(st.la
 function opt(v, cur, label) { return '<option value="' + esc(v) + '"' + (String(v) === String(cur == null ? '' : cur) ? ' selected' : '') + '>' + esc(label == null ? v : label) + '</option>'; }
 const SV = (paths, size) => '<svg width="' + (size || 22) + '" height="' + (size || 22) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
 const I = {
+  chevdown: SV('<path d="M6 9l6 6 6-6"/>', 20),
   filter: SV('<path d="M4 5h16l-6 7.5V19l-4 1.5v-8z"/>', 18),
   finger: SV('<path d="M18.9 7a8 8 0 0 1 1.1 5v1a6 6 0 0 0 .8 3"/><path d="M8 11a4 4 0 0 1 8 0v1a10 10 0 0 0 2 6"/><path d="M12 11v2a14 14 0 0 0 2.5 8"/><path d="M8 15a18 18 0 0 0 1.8 6"/><path d="M4.9 19a22 22 0 0 1 -.9 -7v-1a8 8 0 0 1 12 -6.95"/>', 28),
   back: SV('<path d="M15 6l-6 6l6 6"/>', 24),
@@ -816,6 +817,28 @@ function itemsListHTML() {
     esc([i.owner && i.owner !== 'Shared' ? i.owner + '\'s' : '', i.category, propName(i.propertyId) + (i.location ? ', ' + i.location : ''), openFor.has(i.id) ? 'claim open' : ''].filter(Boolean).join(' · ')) + '</div></div>' + badge(st) + '</a>').join('') + '</div>' +
     (more > 0 ? '<button class="btn quiet" data-act="itemsmore">Show ' + Math.min(more, ITEMS_PAGE) + ' more (' + more + ' not shown)</button>' : '');
 }
+/* Stores used before, most used first, for the store drop-down. */
+function allStores() {
+  const n = new Map();
+  live('items').map((i) => i.store).concat(live('files').map((f) => f.store)).forEach((s) => {
+    s = String(s || '').trim(); if (!s) return;
+    const k = s.toLowerCase(), cur = n.get(k) || { name: s, count: 0 }; cur.count++; n.set(k, cur);
+  });
+  return Array.from(n.values()).sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+}
+/* A store box: type a new store, or tap the arrow (or start typing) to pick one used before. */
+function storeBox(value) {
+  return '<div class="storebox"><div class="storerow"><input name="store" data-store autocomplete="off" value="' + esc(value || '') + '" placeholder="Type or choose a store">' +
+    '<button type="button" class="storebtn" data-act="storeopen" aria-label="Choose from stores used before" aria-expanded="false">' + I.chevdown + '</button></div>' +
+    '<div class="storelist" role="listbox" hidden></div></div>';
+}
+function storeListHTML(filter) {
+  const q = String(filter || '').trim().toLowerCase(), all = allStores();
+  const list = q ? all.filter((s) => s.name.toLowerCase().includes(q)) : all;
+  if (!all.length) return '<div class="muted storeempty">No stores yet. Type one in; it will be here next time.</div>';
+  if (!list.length) return '<div class="muted storeempty">No store matching "' + esc(filter) + '". Keep typing to add it as new.</div>';
+  return list.slice(0, 60).map((s) => '<button type="button" class="storeopt" role="option" data-act="storepick" data-v="' + esc(s.name) + '">' + esc(s.name) + '<span>' + s.count + '</span></button>').join('');
+}
 function viewItems() {
   const props = D.lists.properties;
   let h = header('Items', { right: '<a class="iconbtn" href="#/new" aria-label="Add item" style="background:var(--accent);color:var(--accent-ink)">' + I.plus + '</a>' });
@@ -911,7 +934,7 @@ function viewItemEdit(id) {
     '<label class="field"><span>Belongs to</span><select name="owner">' + peopleList().concat(it.owner && !peopleList().includes(it.owner) ? [it.owner] : []).map((o) => opt(o, it.owner)).join('') + '</select></label></div>';
   h += '<datalist id="locs">' + D.lists.locations.map((l) => '<option value="' + esc(l) + '">').join('') + '</datalist>';
   h += f('spot', 'Exact spot', it.spot, 'text', 'placeholder="Indoor unit north wall, outdoor unit side path"');
-  h += '<label class="field"><span>Store</span><input name="store" list="stores" value="' + esc(it.store || '') + '"></label><datalist id="stores">' + stores.map((s) => '<option value="' + esc(s) + '">').join('') + '</datalist>';
+  h += '<label class="field"><span>Store</span>' + storeBox(it.store) + '</label>';
   h += '<div class="grid2">' + f('purchaseDate', 'Purchase date', it.purchaseDate, 'date') + f('installDate', 'Install date', it.installDate, 'date') + '</div>';
   h += '<div class="grid2">' + f('price', 'Price paid (AUD)', it.price, 'number') + f('replacementValue', 'Replacement value (AUD)', it.replacementValue, 'number') + '</div>';
   h += '<label class="field"><span>Status</span><select name="status">' + ITEM_STATUS.map((s) => opt(s, it.status || 'Active')).join('') + '</select></label>';
@@ -930,7 +953,8 @@ function viewWarranty(itemId, wid) {
   const isNew = wid === 'new';
   const w = isNew ? { type: 'Manufacturer', startFrom: 'purchase', termUnit: 'years', termValue: '' } : D.warranties[wid];
   if (!w) return viewItem(itemId);
-  let h = header(isNew ? 'Add warranty' : 'Edit warranty', { back: '#/item/' + itemId, sub: it.name });
+  const fromRun = typeof WARRANTY_RUN !== 'undefined' && WARRANTY_RUN && WARRANTY_RUN.items.includes(itemId);
+  let h = header(isNew ? 'Add warranty' : 'Edit warranty', { back: fromRun ? '#/warrantyrun' : '#/item/' + itemId, sub: it.name });
   h += '<main><form class="form" data-form="warranty" data-item="' + itemId + '" data-id="' + esc(isNew ? '' : wid) + '">';
   h += '<label class="field"><span>Type</span><select name="type">' + D.lists.warrantyTypes.map((t) => opt(t, w.type)).join('') + '</select></label>';
   h += '<label class="field"><span>Covers</span><textarea name="covers" class="grow" rows="2" placeholder="Whole item, or what\'s covered, e.g. compressor 10 years, parts and labour 2 years">' + esc(w.covers || '') + '</textarea></label>';
@@ -1090,7 +1114,7 @@ function kindFields(kind, v) {
   return '<label class="field"><span>What is it?</span><select name="kind" data-kindsel>' + FILE_KINDS.map((k) => opt(k, kind)).join('') + '</select></label>' +
     '<div class="grid2" data-show="receipt doc"' + (g === 'photo' ? ' hidden' : '') + '><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(v.date || '') + '"></label>' +
     '<label class="field" data-show="receipt"' + (g !== 'receipt' ? ' hidden' : '') + '><span>Total (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(v.total === undefined ? '' : v.total) + '"></label></div>' +
-    '<label class="field" data-show="receipt"' + (g !== 'receipt' ? ' hidden' : '') + '><span>Store</span><input name="store" value="' + esc(v.store || '') + '"></label>';
+    '<label class="field" data-show="receipt"' + (g !== 'receipt' ? ' hidden' : '') + '><span>Store</span>' + storeBox(v.store) + '</label>';
 }
 function applyKindFields(sel) {
   const g = kindGroup(sel.value), form = sel.closest('form');
@@ -1489,7 +1513,7 @@ function viewImport() {
     h += '<label class="field req"><span>Item name</span><input name="name" value="' + esc(d.title) + '" required></label>';
     h += '<div class="grid2"><label class="field"><span>Date</span><input name="date" type="date" value="' + esc(d.date || '') + '"></label>' +
       '<label class="field"><span>Price (AUD)</span><input name="total" type="number" inputmode="decimal" step="0.01" min="0" value="' + esc(d.total) + '"></label></div>';
-    h += '<label class="field"><span>Store</span><input name="store" value="' + esc(d.store || '') + '"></label>';
+    h += '<label class="field"><span>Store</span>' + storeBox(d.store) + '</label>';
     h += '<div class="grid2"><label class="field"><span>Category</span><select name="category">' + opt('', '', 'Choose…') + D.lists.categories.map((c) => opt(c, '')).join('') + '</select></label>' +
       '<label class="field"><span>Warranty</span><select name="warranty">' + opt('', d.lifetime ? 'lifetime' : '', 'None or unknown') + opt('lifetime', d.lifetime ? 'lifetime' : '', 'Lifetime') +
       [1, 2, 3, 5, 7, 10, 25].map((y) => opt(String(y), '', y + ' year' + (y > 1 ? 's' : ''))).join('') + '</select></label></div>';
@@ -2326,7 +2350,7 @@ function viewSplit(fileId) {
   if (on.length) h += '<div class="card pad"><div class="muted">Already on this receipt</div>' + on.map((id) => '<div>' + esc(D.items[id].name) + (D.items[id].price !== '' && D.items[id].price != null ? ' · ' + fmtMoney(D.items[id].price) : '') + '</div>').join('') + '</div>';
   h += '<div class="muted">The same store, date and property go on every item. The receipt is saved once and shows on each one.</div>';
   const stores = Array.from(new Set(live('items').map((i) => i.store).concat(live('files').map((x) => x.store)).filter(Boolean))).sort();
-  h += '<div class="grid2"><label class="field"><span>Store</span><input name="store" list="stores" value="' + esc(f.store || (first && first.store) || '') + '"></label>' +
+  h += '<div class="grid2"><label class="field"><span>Store</span>' + storeBox(f.store || (first && first.store) || '') + '</label>' +
     '<label class="field"><span>Purchase date</span><input name="purchaseDate" type="date" value="' + esc(f.date || (first && first.purchaseDate) || '') + '"></label></div>' +
     '<datalist id="stores">' + stores.map((s) => '<option value="' + esc(s) + '">').join('') + '</datalist>';
   h += '<div class="grid2"><label class="field"><span>Property</span><select name="propertyId">' + D.lists.properties.map((p) => opt(p.id, first ? first.propertyId : (D.lists.properties[0] || {}).id, p.name)).join('') + '</select></label>' +
@@ -2374,11 +2398,24 @@ async function saveSplit(form) {
   await saveData();
   const dest = SPLIT_BACK || '#/items'; SPLIT_BACK = null;
   go(dest);
-  setTimeout(() => openSheet(sheetHead(made.length === 1 ? '1 item added' : made.length + ' items added') +
-    '<div class="muted">Each one has the receipt. Add a warranty to each, or do it later.</div><div class="card list">' +
-    made.map((it) => '<div class="row" style="cursor:default"><div class="grow"><div class="t">' + esc(it.name) + '</div><div class="s">' + esc(it.price !== '' ? fmtMoney(it.price) : 'No price') + '</div></div>' +
-      '<a class="btn quiet" style="min-height:40px;padding:0 12px" href="#/warranty/' + it.id + '/new">Add warranty</a></div>').join('') + '</div>' +
-    '<button class="btn primary" data-act="closesheet">Done</button>'), 80);
+  WARRANTY_RUN = { items: made.map((it) => it.id), back: dest };
+  setTimeout(warrantyRunSheet, 80);
+}
+/* After adding several items: one list to add a warranty to each. Saving (or leaving) a warranty comes back to this list. */
+let WARRANTY_RUN = null;
+function warrantyRunSheet() {
+  const r = WARRANTY_RUN; if (!r) return;
+  const items = r.items.map((id) => D.items[id]).filter((it) => it && !it.deleted);
+  if (!items.length) { WARRANTY_RUN = null; return; }
+  const has = (it) => itemWarranties(it.id).length;
+  const done = items.filter(has).length;
+  openSheet(sheetHead(items.length === 1 ? '1 item added' : items.length + ' items added') +
+    '<div class="muted">Each one has the receipt. ' + (done === items.length ? 'All have a warranty now.' : 'Add a warranty to each, or do it later.') + '</div><div class="card list">' +
+    items.map((it) => '<div class="row" style="cursor:default"><div class="grow"><div class="t">' + esc(it.name) + '</div><div class="s">' +
+      esc((it.price !== '' && it.price != null ? fmtMoney(it.price) : 'No price') + (has(it) ? ' · ' + itemWarranties(it.id).length + (itemWarranties(it.id).length === 1 ? ' warranty' : ' warranties') + ' added' : '')) + '</div></div>' +
+      (has(it) ? '<span class="badge b-ok">Done</span><a class="btn quiet" style="min-height:40px;padding:0 10px" href="#/warranty/' + it.id + '/new" aria-label="Add another warranty to ' + esc(it.name) + '">+</a>'
+        : '<a class="btn quiet" style="min-height:40px;padding:0 12px" href="#/warranty/' + it.id + '/new">Add warranty</a>') + '</div>').join('') + '</div>' +
+    '<button class="btn primary" data-act="warrantyrundone">Done</button>');
 }
 /* ---------- v1.13: app lock ----------
    Each phone can set its own PIN, plus fingerprint or face unlock where the phone offers it. The app asks for it when it
@@ -2594,6 +2631,10 @@ const isTyping = (t) => t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT'
 document.addEventListener('focusin', (e) => { if (isTyping(e.target)) document.body.classList.add('typing'); });
 document.addEventListener('focusout', (e) => { if (isTyping(e.target)) setTimeout(() => { if (!isTyping(document.activeElement)) document.body.classList.remove('typing'); }, 50); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'q') { e.preventDefault(); e.target.blur(); } });
+function showStores(box, filter) { const l = box.querySelector('.storelist'); l.innerHTML = storeListHTML(filter); l.hidden = false; box.querySelector('.storebtn').setAttribute('aria-expanded', 'true'); }
+function hideStores(box) { const l = box.querySelector('.storelist'); if (l) l.hidden = true; const b = box.querySelector('.storebtn'); if (b) b.setAttribute('aria-expanded', 'false'); }
+document.addEventListener('input', (e) => { if (e.target.matches && e.target.matches('input[data-store]')) { const box = e.target.closest('.storebox'); if (e.target.value.trim()) showStores(box, e.target.value); else hideStores(box); } });
+document.addEventListener('click', (e) => { document.querySelectorAll('.storebox').forEach((b) => { if (!b.contains(e.target)) hideStores(b); }); }, true);
 /* ---------- routing ---------- */
 /* Background updates (a sync finishing, a note from Our Tax) redraw the screen only when no form is open,
    so nothing you're typing is wiped. The new data shows as soon as you save or move on. */
@@ -2625,6 +2666,7 @@ function render() {
     case 'reports': html = viewReports(); break;
     case 'service': html = viewService(); break;
     case 'split': html = viewSplit(parts[1]); break;
+    case 'warrantyrun': { const b = WARRANTY_RUN ? WARRANTY_RUN.back : '#/items'; setTimeout(() => { location.replace(b); setTimeout(warrantyRunSheet, 80); }, 0); html = ''; break; }
     default: html = viewHome();
   }
   app.innerHTML = html;
@@ -2733,6 +2775,13 @@ const ACT = {
   addfile(el) { addFileSheet(el.dataset.id); },
   filesheet(el) { fileSheet(el.dataset.id, el.dataset.item); },
   closesheet() { closeSheet(); },
+  storeopen(el) { const box = el.closest('.storebox'), l = box.querySelector('.storelist'); if (l.hidden) showStores(box, ''); else hideStores(box); },
+  storepick(el) {
+    const box = el.closest('.storebox'), i = box.querySelector('input[data-store]');
+    i.value = el.dataset.v; hideStores(box);
+    i.dispatchEvent(new Event('change', { bubbles: true }));
+  },
+  warrantyrundone() { WARRANTY_RUN = null; closeSheet(); },
   async splitgo(el) { SPLIT_BACK = null; await keepFileForm(); closeSheet(); go('#/split/' + el.dataset.id); },
   splitrow() { $('#splitrows').insertAdjacentHTML('beforeend', splitRowHTML(SPLIT_N++, false)); const r = $('#splitrows').lastElementChild; r.querySelector('input').focus(); splitUpdate(); },
   splitdel(el) { el.closest('[data-row]').remove(); splitUpdate(); },
@@ -3117,7 +3166,9 @@ document.addEventListener('submit', async (e) => {
     w.termValue = w.termUnit === 'lifetime' ? '' : v('termValue');
     if (w.termUnit !== 'lifetime' && !w.termValue && !w.expiryOverride) { toast('Enter a term, choose Lifetime, or set an expiry date'); return; }
     D.warranties[w.id] = touch(w);
-    await saveData(); toast('Warranty saved'); ITEM_TAB = 'warranties'; go('#/item/' + itemId);
+    await saveData(); toast('Warranty saved');
+    if (WARRANTY_RUN && WARRANTY_RUN.items.includes(itemId)) { go(WARRANTY_RUN.back); setTimeout(warrantyRunSheet, 80); return; } // back to the list of new items
+    ITEM_TAB = 'warranties'; go('#/item/' + itemId);
   } else if (kind === 'snap') {
     const dest = e.submitter ? e.submitter.value : 'inbox';
     SNAP.kind = v('kind'); SNAP.date = v('date'); SNAP.store = v('store'); SNAP.total = v('total');

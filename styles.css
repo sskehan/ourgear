@@ -234,3 +234,16 @@ body.veiled #app, body.veiled #sheet, body.veiled #viewer { visibility: hidden; 
 #filterpanel { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
 #filterpanel[hidden] { display: none; }
 body.typing .nav { display: none; }
+/* 1.20 store drop-down */
+.storebox { display: flex; flex-direction: column; gap: 6px; }
+.storerow { display: flex; gap: 6px; }
+.storerow input { flex: 1; }
+.storebtn { flex: 0 0 48px; min-height: 44px; border: 1px solid var(--field); border-radius: 10px; background: var(--surface); color: var(--accent-text); display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.storebtn[aria-expanded="true"] svg { transform: rotate(180deg); }
+.storelist { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); max-height: 260px; overflow-y: auto; }
+.storelist[hidden] { display: none; }
+.storeopt { display: flex; justify-content: space-between; align-items: center; width: 100%; min-height: 46px; padding: 0 12px; border: 0; border-bottom: 1px solid var(--border); background: none; color: var(--text); font: inherit; font-size: 15px; text-align: left; cursor: pointer; }
+.storeopt:last-child { border-bottom: 0; }
+.storeopt:active { background: var(--accent-soft); }
+.storeopt span { color: var(--muted); font-size: 13px; }
+.storeempty { padding: 10px 12px; font-size: 14px; }
