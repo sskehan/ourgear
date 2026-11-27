@@ -32,6 +32,7 @@ All files go in the main folder of the repo. No subfolders needed.
 
 ## Version history
 
+- 1.19: fixed photos sometimes being lost after taking them (a sync finishing while the camera was open redrew the screen); if the phone closes Our Gear while the camera is open, it now explains and offers the gallery; Items search shows results straight under the search box (filters behind a Filters button, menu bar hidden while typing, the keyboard's search key closes the keyboard)
 - 1.18: warranty Covers is a full-width box that grows to show everything typed, and shows in full on the Warranty tab; warranty type "Maker" renamed "Manufacturer" (existing warranties are renamed automatically)
 - 1.17: "Add photos or PDFs" inside a claim update (an email saved as a PDF goes straight in; on an Email update it's labelled Email); new file type Email
 - 1.16: add several photos at once: "Add photos of the fault" on a claim, item photos from the gallery, and "Add new photos" inside a claim update (picked photos are saved without cropping; use Edit picture on any of them)

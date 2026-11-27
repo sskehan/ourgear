@@ -228,3 +228,9 @@ body.veiled #app, body.veiled #sheet, body.veiled #viewer { visibility: hidden; 
 .draftopt { min-height: 40px; font-size: 14px; padding: 0 8px; }
 /* 1.18 bigger warranty text boxes */
 .field textarea.grow { min-height: 64px; resize: none; overflow: hidden; line-height: 1.4; }
+/* 1.19 items filters behind a button */
+.filterbar { display: flex; gap: 8px; flex-wrap: wrap; }
+.filterbar .chip svg { margin-right: 6px; vertical-align: -3px; }
+#filterpanel { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+#filterpanel[hidden] { display: none; }
+body.typing .nav { display: none; }

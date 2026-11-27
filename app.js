@@ -1,7 +1,7 @@
 /* Our Gear v1.0 — purchases, receipts and warranties.
    Offline web app. Records live on the phone (IndexedDB) and sync to Dropbox. */
 'use strict';
-const APP_VERSION = '1.18';
+const APP_VERSION = '1.19';
 const DROPBOX_KEY = '5ddeosl2pq5dl33';
 const DATA_PATH = '/data/ourgear-data.json';
 const OWNERS = ['Shaun', 'Lyndsey', 'Alex', 'Shared'];
@@ -685,6 +685,7 @@ function badge(st) { return '<span class="badge b-' + st.kind + '">' + esc(st.la
 function opt(v, cur, label) { return '<option value="' + esc(v) + '"' + (String(v) === String(cur == null ? '' : cur) ? ' selected' : '') + '>' + esc(label == null ? v : label) + '</option>'; }
 const SV = (paths, size) => '<svg width="' + (size || 22) + '" height="' + (size || 22) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + paths + '</svg>';
 const I = {
+  filter: SV('<path d="M4 5h16l-6 7.5V19l-4 1.5v-8z"/>', 18),
   finger: SV('<path d="M18.9 7a8 8 0 0 1 1.1 5v1a6 6 0 0 0 .8 3"/><path d="M8 11a4 4 0 0 1 8 0v1a10 10 0 0 0 2 6"/><path d="M12 11v2a14 14 0 0 0 2.5 8"/><path d="M8 15a18 18 0 0 0 1.8 6"/><path d="M4.9 19a22 22 0 0 1 -.9 -7v-1a8 8 0 0 1 12 -6.95"/>', 28),
   back: SV('<path d="M15 6l-6 6l6 6"/>', 24),
   home: SV('<path d="M5 12l-2 0l9 -9l9 9l-2 0"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2 -2v-7"/><path d="M9 21v-6a2 2 0 0 1 2 -2h2a2 2 0 0 1 2 2v6"/>'),
@@ -737,6 +738,9 @@ function syncButton() {
 
 /* ---------- views ---------- */
 let ITEMS_F = { q: '', prop: 'all', cat: '', arch: false, st: 'all', owner: '' };
+/* Filters sit behind a button so search results show straight under the search box, above the keyboard. */
+let ITEMS_FOPEN = false;
+function itemsFilterCount() { return (ITEMS_F.prop !== 'all') + !!ITEMS_F.arch + (ITEMS_F.st !== 'all') + !!ITEMS_F.cat + !!ITEMS_F.owner; }
 const ITEMS_PAGE = 100; let ITEMS_SHOWN = ITEMS_PAGE;
 const ST_FILTERS = [['all', 'Any warranty'], ['soon', 'Expiring soon'], ['ok', 'Covered'], ['life', 'Lifetime'], ['gone', 'Expired'], ['nowar', 'No warranty']];
 let ITEM_TAB = 'details';
@@ -816,12 +820,17 @@ function viewItems() {
   const props = D.lists.properties;
   let h = header('Items', { right: '<a class="iconbtn" href="#/new" aria-label="Add item" style="background:var(--accent);color:var(--accent-ink)">' + I.plus + '</a>' });
   h += '<main><label class="search">' + I.search + '<span class="sr">Search</span><input id="q" type="search" placeholder="Name, brand, model, serial, store" value="' + esc(ITEMS_F.q) + '"></label>';
+  const nf = itemsFilterCount();
+  h += '<div class="filterbar"><button class="chip" data-act="ffilters" aria-expanded="' + ITEMS_FOPEN + '" aria-controls="filterpanel">' + I.filter + 'Filters' + (nf ? ' (' + nf + ')' : '') + '</button>' +
+    (nf ? '<button class="chip" data-act="fclear">Clear filters</button>' : '') + '</div>';
+  h += '<div id="filterpanel"' + (ITEMS_FOPEN ? '' : ' hidden') + '>';
   h += '<div class="chips">' + '<button class="chip" data-act="fprop" data-v="all" aria-pressed="' + (ITEMS_F.prop === 'all') + '">All</button>' +
     props.map((p) => '<button class="chip" data-act="fprop" data-v="' + esc(p.id) + '" aria-pressed="' + (ITEMS_F.prop === p.id) + '">' + esc(p.name) + '</button>').join('') +
     '<button class="chip" data-act="farch" aria-pressed="' + ITEMS_F.arch + '">Include archived</button></div>';
   h += '<div class="grid2"><label class="field"><span>Warranty</span><select id="fst">' + ST_FILTERS.map(([k, l]) => opt(k, ITEMS_F.st, l)).join('') + '</select></label>' +
     '<label class="field"><span>Category</span><select id="fcat">' + opt('', ITEMS_F.cat, 'All categories') + D.lists.categories.map((c) => opt(c, ITEMS_F.cat)).join('') + '</select></label></div>' +
     '<label class="field"><span>Belongs to</span><select id="fowner">' + opt('', ITEMS_F.owner, 'Anyone') + peopleList().map((o) => opt(o, ITEMS_F.owner)).join('') + '</select></label>';
+  h += '</div>';
   h += '<div class="muted" id="itemcount"></div><div id="itemlist"></div></main>';
   return h + nav('items');
 }
@@ -2564,11 +2573,33 @@ async function pinAskSubmit(form) {
 }
 /* A text box that grows to show everything typed in it. */
 function growBox(t) { t.style.height = 'auto'; t.style.height = Math.max(t.scrollHeight + 2, 64) + 'px'; }
+/* If Android closes Our Gear while the camera or gallery is open, remember what was being added so it can carry on. */
+document.addEventListener('click', (e) => {
+  const l = e.target.closest('label[for="camIn"], label[for="pickIn"]');
+  if (l) try { sessionStorage.setItem('og_snapping', JSON.stringify({ at: Date.now(), target: SNAP_TARGET, type: SNAP_TYPE, claim: CLAIM_TARGET, cam: l.htmlFor === 'camIn' })); } catch (e2) { /* ignore */ }
+}, true);
+document.addEventListener('change', (e) => { if (e.target.id === 'camIn' || e.target.id === 'pickIn') try { sessionStorage.removeItem('og_snapping'); } catch (e2) { /* ignore */ } }, true);
+function resumeSnap() {
+  let s = null; try { s = JSON.parse(sessionStorage.getItem('og_snapping') || 'null'); sessionStorage.removeItem('og_snapping'); } catch (e) { return; }
+  if (!s || Date.now() - s.at > 15 * 60000) return;
+  SNAP_TARGET = s.target && D.items[s.target] ? s.target : null; SNAP_TYPE = s.type || 'receipt'; CLAIM_TARGET = s.claim && D.claims[s.claim] ? s.claim : null;
+  location.hash = '#/snap';
+  setTimeout(() => openSheet(sheetHead('The photo didn\'t come through') +
+    '<p>Your phone closed Our Gear while the ' + (s.cam ? 'camera' : 'gallery') + ' was open (it does this when it\'s short of memory), so ' + (s.cam ? 'the photo' : 'the picture') + ' didn\'t reach Our Gear.</p>' +
+    (s.cam ? '<p>The camera usually still saves it to your gallery. Tap <b>Choose from gallery</b> to add it, or take it again.</p>' : '<p>Tap <b>Choose from gallery</b> to pick it again.</p>') +
+    '<button class="btn primary" data-act="closesheet">OK</button>'), 300);
+}
+/* While typing, the bottom menu bar steps aside so more of the screen is left above the keyboard. */
+const isTyping = (t) => t && (t.tagName === 'TEXTAREA' || (t.tagName === 'INPUT' && /^(text|search|number|email|tel|url|password)$/.test(t.type)));
+document.addEventListener('focusin', (e) => { if (isTyping(e.target)) document.body.classList.add('typing'); });
+document.addEventListener('focusout', (e) => { if (isTyping(e.target)) setTimeout(() => { if (!isTyping(document.activeElement)) document.body.classList.remove('typing'); }, 50); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'q') { e.preventDefault(); e.target.blur(); } });
 /* ---------- routing ---------- */
 /* Background updates (a sync finishing, a note from Our Tax) redraw the screen only when no form is open,
    so nothing you're typing is wiped. The new data shows as soon as you save or move on. */
 function refreshView() {
-  if (document.querySelector('#app form[data-form]')) { const el = document.getElementById('syncmsg'); if (el) el.textContent = syncLabel(); return; }
+  // A form is open, or the camera / file picker may be open: redrawing would lose what's typed or the photo coming back.
+  if (document.querySelector('#app form[data-form]') || document.querySelector('#app input[type="file"]') || (SNAP && location.hash.startsWith('#/snap'))) { const el = document.getElementById('syncmsg'); if (el) el.textContent = syncLabel(); return; }
   render();
 }
 function render() {
@@ -2660,6 +2691,8 @@ const ACT = {
   tab(el) { ITEM_TAB = el.dataset.v; render(); },
   fprop(el) { ITEMS_F.prop = el.dataset.v; ITEMS_SHOWN = ITEMS_PAGE; render(); },
   farch() { ITEMS_F.arch = !ITEMS_F.arch; ITEMS_SHOWN = ITEMS_PAGE; render(); },
+  ffilters() { ITEMS_FOPEN = !ITEMS_FOPEN; render(); },
+  fclear() { Object.assign(ITEMS_F, { prop: 'all', arch: false, st: 'all', cat: '', owner: '' }); ITEMS_SHOWN = ITEMS_PAGE; render(); },
   itemsmore() { ITEMS_SHOWN += ITEMS_PAGE; const l = $('#itemlist'); if (l) l.innerHTML = itemsListHTML(); },
   async archive(el) {
     const it = D.items[el.dataset.id];
@@ -3011,7 +3044,7 @@ document.addEventListener('change', async (e) => {
     return;
   }
   if (t.id === 'camIn' || t.id === 'pickIn') { const f = t.files && t.files[0]; if (f) { const cl = CLAIM_TARGET; await startSnap(f, SNAP_TARGET, cl ? 'photo' : SNAP_TYPE); if (SNAP) SNAP.claimId = cl; } return; }
-  if (t.id === 'fcat') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.cat = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
+  if (t.id === 'fcat') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.cat = t.value; render(); return; }
   if (t.id === 'claimStatus') {
     const c = D.claims[t.dataset.id]; c.status = t.value;
     if (!isOpenClaim(c) && !c.closed) c.closed = todayISO();
@@ -3020,8 +3053,8 @@ document.addEventListener('change', async (e) => {
     touch(c); await saveData(); render(); toast('Status: ' + c.status); return;
   }
   if (t.dataset && t.dataset.kindsel !== undefined) { applyKindFields(t); return; }
-  if (t.id === 'fowner') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.owner = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
-  if (t.id === 'fst') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.st = t.value; $('#itemlist').innerHTML = itemsListHTML(); return; }
+  if (t.id === 'fowner') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.owner = t.value; render(); return; }
+  if (t.id === 'fst') { ITEMS_SHOWN = ITEMS_PAGE; ITEMS_F.st = t.value; render(); return; }
   if (t.id === 'repProp') { REP.prop = t.value; render(); return; }
   if (t.id === 'repArch') { REP.arch = t.checked; render(); return; }
   if (t.id === 'impStatus') { const b = $('#impAccept'), n = $('#impStatusNote'); if (b) b.textContent = t.value === 'Active' ? 'Accept' : 'Archive'; if (n) n.hidden = t.value === 'Active'; return; }
@@ -3283,6 +3316,7 @@ async function boot() {
   if (location.search.includes('share=1')) history.replaceState(null, '', location.pathname + '#/inbox');
   await loadImport().catch(() => {});
   await importShared().catch(() => {});
+  resumeSnap();
   render();
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
